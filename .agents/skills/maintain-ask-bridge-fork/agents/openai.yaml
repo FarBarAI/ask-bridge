@@ -1,0 +1,4 @@
+interface:
+  display_name: "維護 ask-bridge 組織副本"
+  short_description: "保存個人修正、整合官方更新並管理候選版本、執行檔與操作技能"
+  default_prompt: "請使用 $maintain-ask-bridge-fork 維護這份 ask-bridge，依照我的要求保存修正或整合官方更新，並回報驗證與部署狀態。"

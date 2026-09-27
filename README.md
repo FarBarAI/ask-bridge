@@ -1,5 +1,19 @@
 # Ask Bridge 🦀
 
+## 這份副本的維護方式
+
+組織副本：[FarBarAI/ask-bridge](https://github.com/FarBarAI/ask-bridge)，Fork 自 [doggy8088/ask-bridge](https://github.com/doggy8088/ask-bridge)。組織預設使用 `codex/local-fixes` 分支，`main` 保留官方來源。
+
+這份工作版本保留官方 `0.2.13` 基底上的輸入框、回覆定位、完成判斷與逾時擷取修正。後續長篇回答仍曾發生完成訊號未被辨識，詳細證據與限制見[維護狀態](.agents/skills/maintain-ask-bridge-fork/references/maintenance-state.md)。
+
+保存修正、整合官方更新、管理候選版本或回復使用中的程式時，使用專案 skill：
+
+```text
+$maintain-ask-bridge-fork 請檢查官方更新，保留目前使用中的執行檔，整理候選版本與需要保留的個人修正。
+```
+
+完整流程見[維護 skill](.agents/skills/maintain-ask-bridge-fork/SKILL.md)。`main` 保存官方來源，`codex/local-fixes` 保存組織修正；新版先準備與驗證，再依部署授權切換。官方 `ask-bridge update`、下方安裝器與 npm wrapper 仍使用原作者下載來源，不能用來保證安裝此修正版。
+
 `ask-bridge` 是以 Rust 撰寫的輕量命令列工具，可透過真實 Chrome 瀏覽器自動操作 ChatGPT、Gemini 與 Claude。它使用 Model Context Protocol MCP 與 Chrome DevTools Protocol CDP，並透過內建的 `doggy8088/mcp-cli` Rust library dependency 搭配 `chrome-devtools-mcp` 控制 Chrome、輸入 prompt、送出訊息，並將回覆輸出到終端機。未設定全域 provider 時預設使用 ChatGPT，可用 `--provider gemini`、`--provider claude` 或全域設定檔切換 provider。
 
 ## 設計意圖
@@ -268,7 +282,25 @@ ask-bridge "請幫我整理這份報告" --timeout 600
 ask-bridge "簡短回覆" --timeout 60
 ```
 
-超過設定秒數仍未完成時，會輸出超時警告並直接結束回應等待流程。
+等待時間從 prompt 送出完成後開始，以實際經過時間計算；啟動瀏覽器、載入頁面與上傳附件不包含在此時間。每次回覆檢查也會受到剩餘時間限制。
+
+到達上限後，工具最多用 5 秒做一次最後檢查；若已確認回答完成，仍可取回。完整回答擷取另有最多 10 秒預算，部分回答擷取最多 5 秒，圖片下載另有等待流程。文字暫停更新或找不到停止按鈕，不會單獨被視為完成。
+
+| 結果 | 結束狀態 | 輸出 |
+|---|---|---|
+| 確認回答完成，成功擷取並完成指定輸出與圖片流程 | `0` | 完整回答與對話連結 |
+| 逾時、只有部分回答、未找到本次回答或完成狀態不明 | `1` | 明確診斷、可取得的部分回答與對話連結 |
+| 回答擷取、檔案寫入或圖片下載失敗 | `1` | 具體錯誤與對話連結 |
+
+指定 `--output reply.md` 時，完整回答寫入 `reply.md`；部分回答另存為 `reply.partial.md`。若部分回答檔已存在，會使用 `reply.1.partial.md` 等名稱，避免覆蓋既有結果。對話連結或部分文字存在不代表命令成功。
+
+網站回答已完成而 CLI 未取回時，可使用以下維護命令讀取同一對話：
+
+```bash
+ask-bridge --timeout 15 --output reply.md get 'https://chatgpt.com/c/對話ID'
+```
+
+`get` 優先重用相同對話的頁籤，核對對話與回答身分，最多等待 `min(--timeout, 15)` 秒載入並確認回答，另有一次最多 5 秒的最後檢查；若仍在生成，會立即回報未完成，不等待生成結束。恢復取回時不會重新送出 prompt。
 
 ### 8. 顯示版本
 

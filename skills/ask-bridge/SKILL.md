@@ -180,14 +180,14 @@ prompt + "\n\n" + stdin
 | `-p`, `--provider <PROVIDER>` | 選擇 provider | 可用 `chatgpt`、`gemini` 或 `claude`；此為 global option，可放在子命令前後；優先權高於全域設定檔 |
 | `--headless[=<HEADLESS>]` | 控制 Chrome 是否 headless | 預設 `true`；要顯示瀏覽器請用 `--headless=false`；不要寫成 `--headless false` |
 | `--new` | 開啟全新 provider 對話 | 會開啟並綁定新的唯一分頁，同時保留所有既有頁籤；用於隔離上下文 |
-| `--session <URL_OR_ID>` | 接續既有 provider 對話 | 可傳完整對話 URL 或對話 ID；`--session-id`、`--session-url` 為別名；不能與 `--new` 同時使用 |
+| `--session <URL_OR_ID>` | 接續既有 provider 對話 | 可傳完整對話 URL 或對話 ID；`--session-id`、`--session-url` 為別名；只可用於一般 prompt，不能搭配 `--new` 或任何子命令 |
 | `-v`, `-V`, `--version` | 顯示版本 | `-V` 是原始碼中定義的短別名；文件與一般操作優先用 `-v` 或 `--version` |
 | `--verbose` | 顯示瀏覽器自動化流程 | 用於診斷 provider UI、登入、上傳、模型切換或等待回覆問題 |
 | `-o`, `--output <FILE>` | 將最終 Markdown 回覆寫入檔案 | 同時仍會在終端機輸出渲染結果；適合保留研究紀錄 |
 | `-i`, `--image-output <IMAGE_PATH>` | 下載 provider 回覆中的生成圖片 | 可指定資料夾或檔案路徑；可搭配一般 prompt、`get` 或 `open <url>` |
 | `--image <IMAGE_FILE>` | 附加圖片檔，可重複指定 | 支援 ChatGPT 與 Claude；搭配 Gemini 會失敗 |
 | `--file <FILE>` | 附加文件檔，可重複指定 | 支援 PDF、Word、Excel、PowerPoint、純文字、Markdown、CSV、JSON、程式碼等；ChatGPT、Gemini 與 Claude 都可用 |
-| `--timeout <SECONDS>` | 設定等待上限 | 必須是大於 0 的整數，預設 `300` 秒；同時套用於一般回覆與 `login` 登入偵測 |
+| `--timeout <SECONDS>` | 設定等待上限 | 必須是大於 0 的整數，預設 `300` 秒；控制一般回覆與 `login` 登入偵測；回覆輪詢會限制每次 MCP 呼叫的剩餘時間，`get` 只等待回答載入與確認，不等待生成完成 |
 | `--model <MODEL>` | 送出 prompt 前切換模型 | 比對不分大小寫與標點；模型名稱取決於 provider UI 與帳號權限 |
 | `--reasoning <REASONING>` | 切換 provider 推理模式 | ChatGPT 支援 `auto`、`instant`、`medium`、`high`；Gemini 支援 `extended`；Claude 不支援 |
 | `-h`, `--help` | 顯示 help | 可用 `ask-bridge --help` 或 `ask-bridge help <COMMAND>` |
@@ -318,7 +318,11 @@ ask-bridge '請完整分析這份報告。' --file report.pdf --timeout 600
 ask-bridge --timeout 600 login
 ```
 
-`--timeout` 必須是大於 0 的整數。一般回覆逾時時，工具會停止等待並輸出警告；不要把空白或未完成的輸出當成有效回覆。登入逾時只代表仍未偵測到完成狀態，需檢查瀏覽器後再決定是否重試。
+`--timeout` 必須是大於 0 的整數。一般回覆等待從送出完成後開始，使用實際經過時間計算；啟動 Chrome、載入頁面與上傳附件不包含在此等待時間。逾時後最多用 5 秒再檢查一次；回答擷取另有最多 10 秒預算，部分回答擷取最多 5 秒，圖片下載另有等待流程。
+
+命令只有在確認完成且成功擷取、寫入指定檔案及完成圖片下載流程時回傳狀態 `0`。逾時、只有部分回答、找不到本次回答、擷取或寫入失敗均回傳 `1`；不要只因有 thread URL 或文字就判定成功。指定 `--output reply.md` 時，未完成內容會另存為 `reply.partial.md`，既有檔案存在則使用 `reply.1.partial.md` 等名稱，不覆蓋完整結果。
+
+`get <URL>` 優先重用相同對話頁籤，最多等待 `min(--timeout, 15)` 秒讓回答載入並確認完成狀態，另有一次最多 5 秒的最後檢查；若頁面仍在生成，立即回報未完成。登入逾時仍需檢查瀏覽器後再決定是否重試。
 
 ## 模型與推理模式切換
 
@@ -377,6 +381,9 @@ ask-bridge --session-url 'https://chatgpt.com/c/conversation-uuid' '請產出下
 
 完整 URL 會辨識 provider；若同時明確指定不同的 `--provider`，命令會停止。
 不要使用對話標題猜測 session，也不要將 `--session` 與 `--new` 同時使用。
+`--session` 只接受一般 prompt 呼叫；`get` 子命令要把對話 URL 當作位置參數，例如 `ask-bridge get 'https://chatgpt.com/c/...'`。`--session` 搭配 `get`、`dump` 等子命令會被拒絕。
+
+同一台電腦上的不同 agent session 會共用 ask-bridge 的 Chrome profile 與遠端除錯 port `9223`。一次只執行一個 ask-bridge 命令；等前一個命令結束、確認瀏覽器頁籤狀態後，再開始下一個，避免命令互相切換目前控制的頁籤。
 
 一般提問預設 `--headless=true`。需要觀察 Chrome 操作時使用：
 
@@ -410,7 +417,7 @@ ask-bridge close
 | 子命令 | 用途 | 範例 |
 |---|---|---|
 | `open [url]` | 不帶 URL 時開啟 provider；帶 URL 時開啟該對話並複製最新回覆 | `ask-bridge open`、`ask-bridge open 'https://chatgpt.com/c/...'` |
-| `get [url]` | 從目前 provider 或指定 URL 取得最新回覆；目前固定使用可見瀏覽器 | `ask-bridge get`、`ask-bridge -o /tmp/reply.md get 'https://gemini.google.com/app/...'` |
+| `get [url]` | 從目前 provider 或指定 URL 擷取最新已完成回覆；等待頁面內容載入，但不等待 provider 完成生成 | `ask-bridge get`、`ask-bridge -o /tmp/reply.md get 'https://gemini.google.com/app/...'` |
 | `dump` | 將目前分頁 HTML 寫到 `target/dump.html`，供除錯使用 | `ask-bridge --verbose dump` |
 | `screenshot` | 將目前分頁截圖寫到 `target/screenshot.png`，供除錯使用 | `ask-bridge --headless=false screenshot` |
 
@@ -421,9 +428,11 @@ ask-bridge close
 ## 執行與診斷特性
 
 - 每次 CLI 執行會重用同一個長連線 `chrome-devtools-mcp` 子程序，不會為每個瀏覽器操作重啟 MCP server。
-- 專案目前固定使用 `chrome-devtools-mcp@1.7.0`，並直接透過內建的 `mcp-cli` Rust library 建立 stdio 連線；不需要另外安裝 `mcp-cli` 執行檔。
-- MCP 連線建立上限為 `120` 秒，單次 MCP tool 呼叫上限為 `90` 秒。這兩個內部上限與使用者設定的 `--timeout` 不同；`--timeout` 只控制 provider 回覆與登入偵測等待時間。
+- 專案目前固定使用 `chrome-devtools-mcp@1.7.0`，並透過內建 Rust client 建立 stdio 連線；不需要另外安裝 `mcp-cli` 執行檔。
+- MCP 連線建立上限為 `120` 秒，單次 MCP tool 呼叫上限為 `90` 秒。這兩個內部上限與使用者設定的 `--timeout` 不同；回覆輪詢另外將單次呼叫限制在剩餘等待時間內，連線逾時後不自動重播送出。
 - MCP 設定、日誌與 Chrome profile 分別位於 `~/.config/ask-bridge/mcp_servers.json`、`~/.config/ask-bridge/chrome-devtools-mcp.log` 與 `~/.config/ask-bridge/chrome-profile`。Chrome 使用遠端除錯 port `9223`。
+- 這裡的 MCP 版本由 Rust 原始碼中的套件規格固定；在專案目錄執行 `npm install chrome-devtools-mcp@latest` 只會修改 npm 專案依賴，不會改變 ask-bridge 啟動 MCP 時使用的版本。升級前先對照目前執行的 binary、原始碼與 README，再決定是否更新版本並重建。
+- `chrome-devtools-mcp` 的「有新版可用」、使用統計提示與 roots capability 提示本身不是 ChatGPT 載入失敗。roots 提示說明 MCP 檔案工具的寫入路徑受到限制；它不能解釋 provider 頁面的輸入框偵測逾時。
 
 ## 使用回覆
 
@@ -436,21 +445,27 @@ ask-bridge close
 
 ## 失敗處理
 
-登入、CAPTCHA、Cloudflare 或 session 失效時，要求使用者完成 `ask-bridge login`，或在允許互動式瀏覽器時執行登入流程。
+先判斷錯誤發生在哪個階段，再決定是否重試。使用 `--verbose`（不是 `--verbase`）取得流程；一般提問可加 `--headless=false` 觀察瀏覽器，`login` 本身已會開啟可見瀏覽器。頂層選項放在子命令前，例如 `ask-bridge --verbose --timeout 60 login`。
 
-provider UI 變更或自動化失敗時，使用 `--verbose` 取得診斷資訊；必要時用 `--headless=false` 觀察瀏覽器狀態：
+| 錯誤或現象 | 通常代表 | 處理方式 |
+|---|---|---|
+| `Timeout waiting for ChatGPT page to load` 或 `Error ensuring ChatGPT tab` | 瀏覽器尚未通過 provider 頁面的就緒檢查；這發生在手動登入完成等待之前，不等同於登入逾時。頁面已顯示但輸入框 selector 過期時也會發生。 | 確認 Chrome 顯示的是 `chatgpt.com` 且頁面載入完成；用 `ask-bridge --verbose login` 重現一次。若畫面有輸入框但仍逾時，檢查實際執行的 binary 版本/路徑與原始碼 selector 是否一致，修正或更新 binary 後再試。提高 `--timeout` 不會延長這個固定的頁面就緒輪詢。 |
+| `Response completion was not confirmed`、`Partial response`，或舊版 `Output stream did not complete` | 尚未確認本次回答完成；網站可能已有完整或部分內容。新版命令回傳 `1`。 | 回報「送出成功、取回未完成」，保留 URL 與部分回答路徑。前一命令結束且網站回答完成後，再執行一次 `ask-bridge get <URL>`；不要自動重送 prompt，也不要把另外研究的回答說成 ask-bridge 的結果。 |
+| `No assistant response found` 或舊版 `No assistant message found on ... page` | 目前選取的頁面沒有被程式辨識的 assistant 回覆；可能是回答尚未出現、選錯頁籤，或頁面 selector 已變。 | 檢查 URL、目前頁籤與回答是否完成；確認後才執行一次 `get`。不要把 `get` 當成等待回覆的輪詢命令，也不要連續重試。 |
+| `Could not find ... upload menu`、`Timed out waiting for ... to show attachment` | provider 附件選單或上傳後確認流程未匹配目前 UI。 | 保留 verbose 錯誤，不要反覆重傳；可改用允許的文字輸入方式，或改用另一個已登入且獲准的 provider。 |
+| `Error switching model: ... picker not found` | provider 模型選單未被辨識，通常是 UI 或模型選項變更。 | 移除 `--model`，用 provider 預設模型重試一次；不要猜測替代模型名稱。 |
+| `MCP tool ... timed out`、`MCP session was reset` 或 transport/process error | MCP 連線或單次瀏覽器工具呼叫逾時；和 provider 回覆等待的 `--timeout` 不同。 | 保留完整錯誤並檢查 Chrome 頁面及前一個命令是否已結束。若失敗點可能已送出 prompt，不要自動重送；先確認 provider 是否收到請求，再決定下一步。 |
 
-```sh
-ask-bridge '請回覆 ok' --verbose
-ask-bridge '請回覆 ok' --headless=false
-ask-bridge --verbose dump
-ask-bridge --headless=false screenshot
-```
+若回報 `Conversation changed`、`Requested assistant response changed` 或 `content changed during retrieval`，代表頁籤或回答在等待／擷取間改變；先核對原對話，不要接收其他對話的內容。網站有回答但命令失敗時，明確區分網站完成與 CLI 取回失敗，不能只因逾時就宣稱網站任務失敗。
+
+登入、CAPTCHA、Cloudflare 或 session 失效時，讓使用者在可見的 ask-bridge Chrome 視窗完成登入。若 CLI 回報 `--session is supported only for a prompt invocation, not with a subcommand`，移除子命令呼叫中的 `--session`，改把 URL 傳給 `get`，或將 `--session` 用於一般 prompt。
+
+目前 CLI 定義的旗標是 `--verbose`。若使用者輸入 `--verbase` 卻仍看到 ask-bridge 已開始操作瀏覽器，先用 `ask-bridge -v` 與 `which ask-bridge`（Windows 用 `where.exe ask-bridge`）確認實際執行的版本與路徑，避免拿一份原始碼解釋另一個安裝版本的行為。
+
+不要同時從多個 agent session 執行 ask-bridge，也不要在前一個 ask-bridge 程序仍執行時呼叫 `get` 或重送 prompt；所有呼叫都會操作共用的 Chrome debug port `9223`，可能造成頁籤選取競爭或重複送出。
 
 Gemini 圖片輸入不支援時，改用 ChatGPT 或 Claude，或改以文字描述圖片內容。不要把同一個失敗命令無限制重試。
 
-模型切換失敗時，移除 `--model` 或改用 provider 預設模型，不要猜測替代模型名稱。
-
-若看到 MCP tool 逾時、傳輸程序結束或 `MCP session was reset; re-run the command`，工具已重設該次執行的持久 MCP session。先保留原始錯誤，再安全地重跑命令一次；涉及送出 prompt 的失敗不要連續盲目重試，以免 provider 已收到前一次請求。
+若 MCP 逾時發生在不會送出內容的讀取步驟，且前一個程序已結束，可重新執行一次；若錯誤發生在送出 prompt、上傳附件或其他可能已改變瀏覽器狀態的步驟，先確認其是否已完成，再決定是否重試。
 
 沒有 prompt 且沒有子命令時，`ask-bridge` 會顯示 help。若任務需要非互動輸出，優先搭配 `--output` 或 shell redirect，避免只依賴終端機渲染結果。
