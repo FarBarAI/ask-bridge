@@ -16,6 +16,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, oneshot};
 use url::Url;
 
+mod response;
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -139,7 +141,36 @@ impl Provider {
 
     fn ready_check_js(self) -> &'static str {
         match self {
-            Provider::ChatGpt => r#"() => document.getElementById('prompt-textarea') !== null"#,
+            Provider::ChatGpt => {
+                r#"() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                        const rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    };
+                    const composerSelectors = [
+                        '#prompt-textarea',
+                        '[data-testid="composer-text-input"]',
+                        'textarea[placeholder*="Message"]',
+                        'textarea[placeholder*="訊息"]',
+                        '[contenteditable="true"][role="textbox"]'
+                    ];
+                    const composer = composerSelectors
+                        .map((selector) => document.querySelector(selector))
+                        .find(isVisible);
+                    const authPath = /\/(auth|login|signup)(\/|$)/i.test(window.location.pathname);
+                    const authControl = Array.from(document.querySelectorAll('a, button'))
+                        .some((el) => {
+                            if (!isVisible(el)) return false;
+                            const text = [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent]
+                                .filter(Boolean).join(' ').trim();
+                            return /^(log in|login|sign in|sign up|登入|登錄|登录|註冊|注册)$/i.test(text);
+                        });
+                    return Boolean(composer) || authPath || authControl;
+                }"#
+            }
             Provider::Gemini => {
                 r#"() => {
                     return document.querySelector('div[role="textbox"][aria-label*="Gemini"]') !== null ||
@@ -311,37 +342,25 @@ impl Provider {
         }
     }
 
-    fn assistant_selector(self) -> &'static str {
+    fn response_provider_name(self) -> &'static str {
         match self {
-            Provider::ChatGpt => "[data-message-author-role=\"assistant\"], .agent-turn",
-            Provider::Gemini => "model-response",
-            Provider::Claude => ".font-claude-response",
-        }
-    }
-
-    fn latest_response_selector(self) -> &'static str {
-        match self {
-            Provider::ChatGpt => {
-                "[data-message-author-role=\"assistant\"], .agent-turn, model-response, .model-response, [data-test-id*=\"response\"], [data-testid*=\"response\"]"
-            }
-            Provider::Gemini => "model-response",
-            Provider::Claude => ".font-claude-response",
-        }
-    }
-
-    fn response_content_selector(self) -> &'static str {
-        match self {
-            Provider::ChatGpt => "",
-            Provider::Gemini => {
-                "message-content, .markdown, structured-content-container.model-response-text"
-            }
-            Provider::Claude => ".standard-markdown, .font-claude-response-body",
+            Provider::ChatGpt => "chatgpt",
+            Provider::Gemini => "gemini",
+            Provider::Claude => "claude",
         }
     }
 
     fn composer_selectors_json(self) -> &'static str {
         match self {
-            Provider::ChatGpt => r##"["#prompt-textarea"]"##,
+            Provider::ChatGpt => {
+                r##"[
+                    "#prompt-textarea",
+                    "[data-testid=\"composer-text-input\"]",
+                    "textarea[placeholder*=\"Message\"]",
+                    "textarea[placeholder*=\"訊息\"]",
+                    "[contenteditable=\"true\"][role=\"textbox\"]"
+                ]"##
+            }
             Provider::Gemini => {
                 r#"[
                     "div[role=\"textbox\"][aria-label*=\"Gemini\"]",
@@ -700,7 +719,7 @@ enum Commands {
         /// Optional conversation URL to open before copying the latest response.
         url: Option<String>,
     },
-    /// Retrieve the latest response from the selected provider (defaults to headless)
+    /// 取回最新已完成的回覆；等待頁面內容載入，但不等待生成結束。
     #[command(hide = true)]
     Get {
         /// Optional conversation URL to fetch before copying the latest response.
@@ -2498,6 +2517,7 @@ impl McpStdioClient {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         let mut child = cmd
             .spawn()
@@ -2573,23 +2593,20 @@ impl McpStdioClient {
                     continue;
                 }
 
-                if let Ok(val) = serde_json::from_str::<Value>(line_trimmed) {
-                    if let Some(id_val) = val.get("id") {
-                        if let Some(id_u64) = id_val.as_u64() {
-                            let mut reqs = pending_requests_reader.lock().await;
-                            if let Some(tx) = reqs.remove(&id_u64) {
-                                if let Some(error) = val.get("error") {
-                                    let msg = error
-                                        .get("message")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("Unknown error");
-                                    let _ = tx.send(Err(msg.to_string()));
-                                } else {
-                                    let result_val =
-                                        val.get("result").cloned().unwrap_or(Value::Null);
-                                    let _ = tx.send(Ok(result_val));
-                                }
-                            }
+                if let Ok(val) = serde_json::from_str::<Value>(line_trimmed)
+                    && let Some(id_u64) = val.get("id").and_then(Value::as_u64)
+                {
+                    let mut reqs = pending_requests_reader.lock().await;
+                    if let Some(tx) = reqs.remove(&id_u64) {
+                        if let Some(error) = val.get("error") {
+                            let msg = error
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown error");
+                            let _ = tx.send(Err(msg.to_string()));
+                        } else {
+                            let result_val = val.get("result").cloned().unwrap_or(Value::Null);
+                            let _ = tx.send(Ok(result_val));
                         }
                     }
                 }
@@ -2720,7 +2737,7 @@ const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(90);
 const MCP_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn mcp_session_connect(config_path: &str) -> Result<McpSession, String> {
+fn mcp_session_connect(config_path: &str, timeout: Duration) -> Result<McpSession, String> {
     let server_config = load_chrome_devtools_config(config_path)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -2729,10 +2746,10 @@ fn mcp_session_connect(config_path: &str) -> Result<McpSession, String> {
         .map_err(|e| format!("Failed to create async runtime for MCP session: {}", e))?;
     let client = runtime.block_on(async {
         let connect_future = McpStdioClient::connect(&server_config);
-        match tokio::time::timeout(MCP_CONNECT_TIMEOUT, connect_future).await {
+        match tokio::time::timeout(timeout, connect_future).await {
             Err(_) => Err(format!(
                 "Failed to start chrome-devtools MCP server: timed out after {}s",
-                MCP_CONNECT_TIMEOUT.as_secs()
+                timeout.as_secs_f64()
             )),
             Ok(result) => {
                 result.map_err(|e| format!("Failed to start chrome-devtools MCP server: {}", e))
@@ -2761,22 +2778,33 @@ fn mcp_session_call(
     config_path: &str,
     tool: &str,
     args: Value,
+    budget: Option<Duration>,
 ) -> Result<Value, String> {
+    let started = Instant::now();
     let needs_connect = slot
         .as_ref()
         .map(|session| session.config_path != config_path)
         .unwrap_or(true);
     if needs_connect {
         mcp_session_reset(slot);
-        *slot = Some(mcp_session_connect(config_path)?);
+        *slot = Some(mcp_session_connect(
+            config_path,
+            budget
+                .unwrap_or(MCP_CONNECT_TIMEOUT)
+                .min(MCP_CONNECT_TIMEOUT),
+        )?);
     }
     let session = slot.as_ref().expect("session connected above");
     session.runtime.block_on(async {
-        match tokio::time::timeout(MCP_CALL_TIMEOUT, session.client.call_tool(tool, args)).await {
+        let remaining = budget
+            .map(|budget| budget.saturating_sub(started.elapsed()))
+            .unwrap_or(MCP_CALL_TIMEOUT)
+            .min(MCP_CALL_TIMEOUT);
+        match tokio::time::timeout(remaining, session.client.call_tool(tool, args)).await {
             Err(_) => Err(format!(
                 "MCP tool '{}' timed out after {}s",
                 tool,
-                MCP_CALL_TIMEOUT.as_secs()
+                remaining.as_secs_f64()
             )),
             Ok(result) => result.map_err(|e| format!("MCP tool call failed: {}", e)),
         }
@@ -2801,10 +2829,31 @@ fn mcp_error_is_transport(message: &str) -> bool {
 }
 
 fn call_mcp_tool(config_path: &str, tool: &str, args: Value) -> Result<Value, String> {
+    call_mcp_tool_budgeted(config_path, tool, args, None)
+}
+
+fn call_mcp_tool_with_timeout(
+    config_path: &str,
+    tool: &str,
+    args: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    if timeout.is_zero() {
+        return Err(format!("MCP tool '{}' has no remaining time budget", tool));
+    }
+    call_mcp_tool_budgeted(config_path, tool, args, Some(timeout.min(MCP_CALL_TIMEOUT)))
+}
+
+fn call_mcp_tool_budgeted(
+    config_path: &str,
+    tool: &str,
+    args: Value,
+    budget: Option<Duration>,
+) -> Result<Value, String> {
     let mut slot = MCP_SESSION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match mcp_session_call(&mut slot, config_path, tool, args) {
+    match mcp_session_call(&mut slot, config_path, tool, args, budget) {
         Ok(value) => Ok(value),
         Err(error) => {
             if mcp_error_is_transport(&error) {
@@ -3017,6 +3066,115 @@ fn validate_provider_feature_support(provider: Provider, cli: &Cli) -> Result<()
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_call_uses_remaining_budget_instead_of_global_mcp_timeout() {
+        if Command::new("node").arg("--version").output().is_err() {
+            eprintln!("Node.js unavailable; skipping local MCP deadline fixture");
+            return;
+        }
+        let dir = make_test_dir("response-mcp-deadline");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let script = r#"const readline = require('node:readline');
+            readline.createInterface({input: process.stdin}).on('line', line => {
+                const request = JSON.parse(line);
+                if (!request.id) return;
+                const delay = request.params?.arguments?.delay_ms || 0;
+                setTimeout(() => process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{content:[]}})+'\n'), delay);
+            });"#;
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "mcpServers": { "chrome-devtools": { "command": "node", "args": ["-e", script] } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut slot = None;
+        mcp_session_call(
+            &mut slot,
+            path.to_str().unwrap(),
+            "probe",
+            serde_json::json!({}),
+            Some(Duration::from_secs(2)),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let error = mcp_session_call(
+            &mut slot,
+            path.to_str().unwrap(),
+            "probe",
+            serde_json::json!({ "delay_ms": 1500 }),
+            Some(Duration::from_millis(30)),
+        )
+        .unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        mcp_session_reset(&mut slot);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn temporary_chatgpt_route_is_not_bound_as_a_persisted_conversation() {
+        for value in [
+            "https://chatgpt.com/",
+            "https://chatgpt.com/c/local-chatgpt%3Aexample",
+            "https://chatgpt.com/c/local-chatgpt:example",
+        ] {
+            assert!(!is_persisted_conversation(
+                Provider::ChatGpt,
+                &Url::parse(value).unwrap()
+            ));
+        }
+        assert!(is_persisted_conversation(
+            Provider::ChatGpt,
+            &Url::parse("https://chatgpt.com/c/11111111-2222-3333-4444-555555555555").unwrap()
+        ));
+    }
+
+    #[test]
+    fn conversation_matching_uses_host_and_path_not_title_or_substring() {
+        assert!(same_response_page(
+            "https://chatgpt.com/c/one/",
+            "https://chatgpt.com/c/one?foo=bar"
+        ));
+        assert!(!same_response_page(
+            "https://chatgpt.com/c/one",
+            "https://chatgpt.com/c/two"
+        ));
+        assert!(!same_response_page(
+            "https://chatgpt.com/c/one",
+            "https://example.com/c/one"
+        ));
+        assert!(!same_response_page(
+            "https://chatgpt.com/c/one",
+            "http://chatgpt.com/c/one"
+        ));
+    }
+
+    #[test]
+    fn partial_responses_do_not_overwrite_completed_output_or_previous_partial() {
+        let dir = make_test_dir("partial-response");
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("reply.md");
+        std::fs::write(&output, "完整回答").unwrap();
+        let first = save_partial_response(output.to_str().unwrap(), "部分回答").unwrap();
+        let second = save_partial_response(output.to_str().unwrap(), "另一部分").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "完整回答");
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "部分回答");
+        assert_eq!(std::fs::read_to_string(second).unwrap(), "另一部分");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn partial_output_write_failure_is_reported() {
+        let dir = make_test_dir("partial-missing-parent");
+        let error =
+            save_partial_response(dir.join("reply.md").to_str().unwrap(), "部分回答").unwrap_err();
+        assert!(error.contains("Failed to save partial response"));
+    }
 
     #[test]
     fn validates_chrome_devtools_mcp_node_versions() {
@@ -4575,81 +4733,230 @@ fn write_clipboard(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn click_latest_copy_button(config_path: &str, provider: Provider) -> Result<(), String> {
-    let response_selector = serde_json::to_string(provider.latest_response_selector())
-        .map_err(|e| format!("Failed to serialize response selector: {}", e))?;
-    let script = r#"() => {
-                const isVisible = (el) => {
-                    if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
-                    const style = window.getComputedStyle(el);
-                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-                    const rect = el.getBoundingClientRect();
-                    return rect.width > 0 && rect.height > 0;
-                };
+const RESPONSE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const RESPONSE_COPY_TIMEOUT: Duration = Duration::from_secs(10);
+const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-                const labelOf = (el) => [
-                    el.getAttribute('aria-label'),
-                    el.getAttribute('title'),
-                    el.getAttribute('data-testid'),
-                    el.textContent
-                ].filter(Boolean).join(' ');
+fn response_script(provider: Provider, expression: &str) -> String {
+    format!(
+        r#"() => {{
+            {}
+            const provider = {:?};
+            try {{ return {}; }} catch (error) {{ return {{ error: error.message }}; }}
+        }}"#,
+        include_str!("response-dom.cjs"),
+        provider.response_provider_name(),
+        expression
+    )
+}
 
-                const isCopyButton = (el) => {
-                    const label = labelOf(el);
-                    return /copy|複製|复制|コピー|복사/i.test(label)
-                        && !/prompt|提示詞|提示词|入力|table|表格/i.test(label);
-                };
-                const copyButtonScore = (el) => {
-                    const label = labelOf(el);
-                    if (!isCopyButton(el) || !isVisible(el)) return -1;
-                    if (el.closest('pre, code, [class*="code"], [data-testid*="code"]')) return -1;
-                    if (/copy-turn-action-button/i.test(label)) return 100;
-                    if (/response|回應|回答|reply/i.test(label)) return 90;
-                    if (el.closest('model-response, response-container, [data-message-author-role="assistant"], .agent-turn, [data-is-streaming], .font-claude-response')) return 50;
-                    return 10;
-                };
-                const messages = Array.from(document.querySelectorAll(__RESPONSE_SELECTOR__));
-                const latest = messages[messages.length - 1];
-                if (!latest) return { ok: false, reason: "No assistant message found" };
-
-                latest.scrollIntoView({ block: 'center', inline: 'nearest' });
-                for (const type of ['pointerover', 'mouseover', 'mouseenter']) {
-                    latest.dispatchEvent(new MouseEvent(type, { bubbles: true, view: window }));
-                }
-
-                const scopes = [
-                    latest,
-                    latest.closest('article'),
-                    latest.closest('[data-testid^="conversation-turn"]'),
-                    latest.parentElement,
-                    latest.parentElement?.parentElement
-                ].filter(Boolean);
-
-                for (const scope of scopes) {
-                    const buttons = Array.from(scope.querySelectorAll('button'));
-                    const candidates = buttons
-                        .map((button) => ({ button, score: copyButtonScore(button) }))
-                        .filter((candidate) => candidate.score >= 0)
-                        .sort((a, b) => b.score - a.score);
-                    if (candidates.length > 0) {
-                        const button = candidates[0].button;
-                        button.click();
-                        return { ok: true, label: labelOf(button) };
-                    }
-                }
-
-                return { ok: false, reason: "Copy response button not found" };
-            }"#
-    .replace("__RESPONSE_SELECTOR__", &response_selector);
-    let res = call_mcp_tool(
+fn evaluate_response_script(
+    config_path: &str,
+    provider: Provider,
+    expression: &str,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let result = call_mcp_tool_with_timeout(
         config_path,
         "evaluate_script",
-        serde_json::json!({
-            "function": script
-        }),
+        serde_json::json!({ "function": response_script(provider, expression) }),
+        timeout,
     )?;
+    let parsed = parse_script_result(&result)?;
+    if let Some(error) = parsed.get("error").and_then(Value::as_str) {
+        return Err(error.to_string());
+    }
+    Ok(parsed)
+}
 
-    let parsed = parse_script_result(&res)?;
+fn read_response_snapshot(
+    config_path: &str,
+    provider: Provider,
+    timeout: Duration,
+) -> Result<response::Snapshot, String> {
+    let result = evaluate_response_script(
+        config_path,
+        provider,
+        "globalThis.AskBridgeResponses.snapshot(provider)",
+        timeout,
+    )?;
+    serde_json::from_value(result).map_err(|error| format!("Invalid response snapshot: {error}"))
+}
+
+fn same_response_page(left: &str, right: &str) -> bool {
+    match (Url::parse(left), Url::parse(right)) {
+        (Ok(left), Ok(right)) => {
+            left.scheme() == right.scheme()
+                && left.host_str().map(|host| host.trim_start_matches("www."))
+                    == right.host_str().map(|host| host.trim_start_matches("www."))
+                && left.port_or_known_default() == right.port_or_known_default()
+                && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
+        }
+        _ => false,
+    }
+}
+
+fn is_persisted_conversation(provider: Provider, url: &Url) -> bool {
+    provider.owns_conversation_url(url)
+        && !(provider == Provider::ChatGpt
+            && url.path().to_ascii_lowercase().contains("/c/local-chatgpt"))
+}
+
+struct ResponseWaitResult {
+    url: Option<String>,
+    snapshot: Option<response::Snapshot>,
+    completed: bool,
+    error: Option<String>,
+}
+
+fn wait_for_response(
+    config_path: &str,
+    provider: Provider,
+    baseline: Option<response::Snapshot>,
+    expected_url: Option<&str>,
+    timeout: Duration,
+    wait_generating: bool,
+    verbose: bool,
+) -> ResponseWaitResult {
+    let started = Instant::now();
+    let expected_page_key = baseline.as_ref().map(|state| state.page_key.clone());
+    let mut bound_url = expected_url.map(str::to_string).or_else(|| {
+        baseline.as_ref().and_then(|state| {
+            Url::parse(&state.url)
+                .ok()
+                .filter(|url| is_persisted_conversation(provider, url))
+                .map(|_| state.url.clone())
+        })
+    });
+    let mut tracker = response::Tracker::new(baseline);
+    let mut result = ResponseWaitResult {
+        url: bound_url.clone(),
+        snapshot: None,
+        completed: false,
+        error: None,
+    };
+    let mut recovery_started: Option<Instant> = None;
+    loop {
+        let remaining = if let Some(recovery) = recovery_started {
+            RESPONSE_RECOVERY_TIMEOUT.saturating_sub(recovery.elapsed())
+        } else {
+            timeout.saturating_sub(started.elapsed())
+        };
+        if remaining.is_zero() {
+            if recovery_started.is_some() {
+                break;
+            }
+            recovery_started = Some(Instant::now());
+            continue;
+        }
+        // 預算不足一次正常輪詢時，直接進入最後檢查，避免極短呼叫逾時重設連線。
+        if remaining < RESPONSE_POLL_INTERVAL {
+            thread::sleep(remaining);
+            continue;
+        }
+        let budget = remaining.min(MCP_CALL_TIMEOUT);
+        match read_response_snapshot(config_path, provider, budget) {
+            Ok(state) => {
+                if expected_page_key
+                    .as_ref()
+                    .is_some_and(|key| key != &state.page_key)
+                    || !provider.owns_url(&state.url)
+                    || bound_url
+                        .as_ref()
+                        .is_some_and(|url| !same_response_page(url, &state.url))
+                {
+                    result.error = Some("Conversation changed while waiting; refusing to retrieve another conversation".into());
+                    break;
+                }
+                if bound_url.is_none()
+                    && Url::parse(&state.url)
+                        .is_ok_and(|url| is_persisted_conversation(provider, &url))
+                {
+                    bound_url = Some(state.url.clone());
+                }
+                result.url = Some(state.url.clone());
+                if verbose {
+                    eprintln!(
+                        "Response state: messages={}, current_request={}, generating={}, completion_signal={}",
+                        state.messages.len(),
+                        tracker.accepts(&state),
+                        state.generating,
+                        state
+                            .latest()
+                            .is_some_and(|message| message.complete_signal)
+                    );
+                }
+                result.error = None;
+                let completed = tracker.observe(&state, started.elapsed());
+                let generating =
+                    state.generating || state.latest().is_some_and(|message| message.streaming);
+                let may_confirm = tracker.accepts(&state)
+                    && state
+                        .latest()
+                        .is_some_and(|message| message.has_content && message.complete_signal);
+                if tracker.accepts(&state) {
+                    result.snapshot = Some(state);
+                }
+                if completed {
+                    result.completed = true;
+                    break;
+                }
+                // get 僅等待頁面回答載入，不替既有回答等待生成結束。
+                if (!wait_generating || recovery_started.is_some()) && generating {
+                    result.error = Some("Assistant response is still generating".into());
+                    break;
+                }
+                if recovery_started.is_some() && !may_confirm {
+                    break;
+                }
+            }
+            Err(error) => {
+                tracker.reset_stability();
+                let transport_failed = mcp_error_is_transport(&error);
+                if verbose {
+                    eprintln!("Response inspection failed: {error}");
+                }
+                result.error = Some(error);
+                // 連線重設會遺失頁籤選擇，不在這裡自動重播操作。
+                if transport_failed {
+                    break;
+                }
+            }
+        }
+        let remaining = if let Some(recovery) = recovery_started {
+            RESPONSE_RECOVERY_TIMEOUT.saturating_sub(recovery.elapsed())
+        } else {
+            timeout.saturating_sub(started.elapsed())
+        };
+        thread::sleep(RESPONSE_POLL_INTERVAL.min(remaining));
+    }
+    result
+}
+
+fn response_target(snapshot: &response::Snapshot) -> Result<response::Target, String> {
+    let message = snapshot
+        .latest()
+        .ok_or("No assistant response following the latest user message")?;
+    Ok(response::Target {
+        url: snapshot.url.clone(),
+        key: message.key.clone(),
+        signature: message.signature.clone(),
+    })
+}
+
+fn click_latest_copy_button(
+    config_path: &str,
+    provider: Provider,
+    target: &response::Target,
+    timeout: Duration,
+) -> Result<(), String> {
+    let target_json = serde_json::to_string(target).map_err(|error| error.to_string())?;
+    let parsed = evaluate_response_script(
+        config_path,
+        provider,
+        &format!("globalThis.AskBridgeResponses.clickCopy(provider, {target_json})"),
+        timeout,
+    )?;
     if parsed["ok"].as_bool().unwrap_or(false) {
         Ok(())
     } else {
@@ -4746,7 +5053,15 @@ fn open_url_tab(
         .ok_or_else(|| format!("Invalid list_pages response structure: {:?}", list_res))?;
 
     let pages_before = parse_pages(text);
-    let target_page_id = if pages_before.len() == 1
+    let target_page_id = if let Some(page) = pages_before
+        .iter()
+        .find(|page| same_response_page(&page.url, url))
+    {
+        if verbose {
+            println!("Reusing conversation tab (ID: {})...", page.id);
+        }
+        page.id
+    } else if pages_before.len() == 1
         && (pages_before[0].url == "about:blank"
             || pages_before[0].url.contains("new-tab-page")
             || pages_before[0].url.contains("chrome://welcome"))
@@ -4797,220 +5112,199 @@ fn open_url_tab(
     wait_for_page_load(config_path, page_provider, verbose)
 }
 
-fn copy_latest_markdown(config_path: &str, provider: Provider) -> Result<String, String> {
-    match copy_latest_markdown_via_clipboard(config_path, provider) {
+fn copy_latest_markdown(
+    config_path: &str,
+    provider: Provider,
+    target: &response::Target,
+) -> Result<String, String> {
+    let started = Instant::now();
+    match copy_latest_markdown_via_clipboard(config_path, provider, target, RESPONSE_COPY_TIMEOUT) {
         Ok(content) => Ok(content),
-        Err(_) => scrape_latest_markdown_from_dom(config_path, provider),
+        Err(copy_error) => {
+            let remaining = RESPONSE_COPY_TIMEOUT.saturating_sub(started.elapsed());
+            scrape_latest_markdown_from_dom(config_path, provider, target, false, remaining)
+                .map_err(|dom_error| format!("Clipboard: {copy_error}; DOM: {dom_error}"))
+        }
+    }
+}
+
+struct ClipboardRestore(String);
+
+impl Drop for ClipboardRestore {
+    fn drop(&mut self) {
+        let _ = write_clipboard(&self.0);
     }
 }
 
 fn copy_latest_markdown_via_clipboard(
     config_path: &str,
     provider: Provider,
+    target: &response::Target,
+    timeout: Duration,
 ) -> Result<String, String> {
-    let clipboard_before = read_clipboard().unwrap_or_default();
-    let sentinel = format!("__ASK_CHATGPT_COPY_PENDING_{}__", std::process::id());
+    let started = Instant::now();
+    // 無法讀取原剪貼簿時直接改用 DOM，避免清空使用者的剪貼簿。
+    let restore = ClipboardRestore(read_clipboard()?);
+    let sentinel = format!("__ASK_BRIDGE_COPY_PENDING_{}__", std::process::id());
     write_clipboard(&sentinel)?;
-
-    // Click the copy button, retrying if the message or button is not found yet (due to asynchronous rendering of Single Page App)
-    let mut click_err = None;
-    for _ in 0..30 {
-        match click_latest_copy_button(config_path, provider) {
-            Ok(_) => {
-                click_err = None;
+    let mut clicked = false;
+    let mut click_error = String::new();
+    // 留一半預算給 DOM 備援；複製操作只限已綁定的完成回答。
+    while started.elapsed() < timeout / 2 {
+        let remaining = (timeout / 2).saturating_sub(started.elapsed());
+        match click_latest_copy_button(config_path, provider, target, remaining) {
+            Ok(()) => {
+                clicked = true;
                 break;
             }
-            Err(e) => {
-                click_err = Some(e);
-                thread::sleep(Duration::from_millis(500));
+            Err(error) => {
+                let transport_failed = mcp_error_is_transport(&error);
+                click_error = error;
+                if transport_failed {
+                    break;
+                }
             }
         }
+        thread::sleep(Duration::from_millis(200).min(remaining));
     }
-
-    if let Some(err) = click_err {
-        // Restore clipboard before returning error
-        let _ = write_clipboard(&clipboard_before);
-        return Err(format!("Error copying latest response Markdown: {}", err));
+    if !clicked {
+        return Err(format!("Error copying response: {click_error}"));
     }
-
-    let mut copied_content = None;
-    for _ in 0..30 {
+    while started.elapsed() < timeout / 2 {
+        if let Ok(content) = read_clipboard()
+            && !content.trim().is_empty()
+            && content != sentinel
+        {
+            drop(restore);
+            return Ok(content);
+        }
         thread::sleep(Duration::from_millis(100));
-        match read_clipboard() {
-            Ok(content) if !content.trim().is_empty() && content != sentinel => {
-                copied_content = Some(content);
-                break;
-            }
-            _ => {}
-        }
     }
-
-    // Always restore the original clipboard
-    let _ = write_clipboard(&clipboard_before);
-
-    let content = copied_content
-        .ok_or_else(|| "Timed out waiting for clipboard content after clicking copy".to_string())?;
-
-    // Create a temporary file path
-    let temp_path = std::env::temp_dir().join(format!("ask_chatgpt_{}.md", std::process::id()));
-
-    // Write the copied content immediately to the temporary file
-    std::fs::write(&temp_path, &content)
-        .map_err(|e| format!("Failed to write to temporary file: {}", e))?;
-
-    // Read the content back from the temporary file to output to the terminal
-    let verified_content = std::fs::read_to_string(&temp_path)
-        .map_err(|e| format!("Failed to read from temporary file: {}", e))?;
-
-    // Clean up temporary file
-    let _ = std::fs::remove_file(&temp_path);
-
-    Ok(verified_content)
+    Err("Timed out waiting for copied response".into())
 }
 
 fn scrape_latest_markdown_from_dom(
     config_path: &str,
     provider: Provider,
+    target: &response::Target,
+    allow_partial: bool,
+    timeout: Duration,
 ) -> Result<String, String> {
-    let latest_selector = serde_json::to_string(provider.latest_response_selector())
-        .map_err(|e| format!("Failed to serialize response selector: {}", e))?;
-    let content_selector = serde_json::to_string(provider.response_content_selector())
-        .map_err(|e| format!("Failed to serialize response content selector: {}", e))?;
-    let inspect_js = r#"() => {
-        const latestSelector = __LATEST_SELECTOR__;
-        const contentSelector = __CONTENT_SELECTOR__;
-        const messages = Array.from(document.querySelectorAll(latestSelector))
-            .filter((el) => ((el.innerText || el.textContent || '').trim().length > 0));
-        const latest = messages[messages.length - 1];
-        if (!latest) return 'No assistant message found';
-        const turn = contentSelector ? (latest.querySelector(contentSelector) || latest) : latest;
-        
-        const elementToMarkdown = (element) => {
-            let markdown = '';
-            const processedSrcs = new Set();
-            const walk = (node) => {
-                if (node.nodeType === Node.TEXT_NODE) {
-                    markdown += node.textContent;
-                    return;
-                }
-                if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-                const tag = node.tagName.toLowerCase();
-                
-                const classText = Array.from(node.classList || []).join(' ');
-                if (node.classList.contains('sr-only') ||
-                    /screen-reader|visually-hidden|cdk-visually-hidden/.test(classText) ||
-                    tag === 'button' || tag === 'style' || tag === 'script') {
-                    return;
-                }
-
-                // Code blocks
-                if (tag === 'pre') {
-                    const codeEl = node.querySelector('code');
-                    const langClass = codeEl ? Array.from(codeEl.classList).find(c => c.startsWith('language-')) : '';
-                    const lang = langClass ? langClass.replace('language-', '') : '';
-                    const codeText = codeEl ? codeEl.textContent : node.textContent;
-                    markdown += '\n```' + lang + '\n' + codeText + '\n```\n';
-                    return;
-                }
-
-                // Inline code
-                if (tag === 'code') {
-                    if (!node.closest('pre')) {
-                        markdown += '`' + node.textContent + '`';
-                        return;
-                    }
-                }
-
-                // Bold
-                if (tag === 'strong' || tag === 'b') {
-                    markdown += '**';
-                    for (const child of node.childNodes) walk(child);
-                    markdown += '**';
-                    return;
-                }
-
-                // Italics
-                if (tag === 'em' || tag === 'i') {
-                    markdown += '*';
-                    for (const child of node.childNodes) walk(child);
-                    markdown += '*';
-                    return;
-                }
-
-                // Links
-                if (tag === 'a') {
-                    const href = node.getAttribute('href') || '';
-                    const text = node.textContent || '';
-                    if (href && text) {
-                        markdown += '[' + text + '](' + href + ')';
-                        return;
-                    }
-                }
-
-                // Paragraphs, headers, list items
-                if (tag === 'p') markdown += '\n';
-                if (tag === 'br') markdown += '\n';
-                if (tag === 'h1') markdown += '\n# ';
-                if (tag === 'h2') markdown += '\n## ';
-                if (tag === 'h3') markdown += '\n### ';
-                if (tag === 'h4') markdown += '\n#### ';
-                if (tag === 'h5') markdown += '\n##### ';
-                if (tag === 'h6') markdown += '\n###### ';
-                if (tag === 'li') markdown += '\n* ';
-
-                // Images
-                if (tag === 'img') {
-                    const src = node.getAttribute('src') || '';
-                    const alt = node.getAttribute('alt') || 'image';
-                    if (src && !src.includes('avatar') && !src.includes('profile')) {
-                        if (processedSrcs.has(src)) return;
-                        processedSrcs.add(src);
-                        markdown += '\n![' + alt + '](' + src + ')\n';
-                        return;
-                    }
-                }
-
-                for (const child of node.childNodes) {
-                    walk(child);
-                }
-
-                if (['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'].includes(tag)) {
-                    markdown += '\n';
-                }
-            };
-
-            walk(element);
-            return markdown.trim().replace(/\n{3,}/g, '\n\n');
-        };
-        
-        return elementToMarkdown(turn);
-    }"#
-    .replace("__LATEST_SELECTOR__", &latest_selector)
-    .replace("__CONTENT_SELECTOR__", &content_selector);
-
-    let res = call_mcp_tool(
+    let target_json = serde_json::to_string(target).map_err(|error| error.to_string())?;
+    let parsed = evaluate_response_script(
         config_path,
-        "evaluate_script",
-        serde_json::json!({
-            "function": inspect_js
-        }),
+        provider,
+        &format!(
+            "globalThis.AskBridgeResponses.markdown(provider, {target_json}, {allow_partial})"
+        ),
+        timeout,
     )?;
-
-    let val = parse_script_result(&res)?;
-    let content = val
+    let content = parsed["content"]
         .as_str()
-        .ok_or_else(|| "DOM scraper returned non-string result".to_string())?
-        .to_string();
-
-    if content == "No assistant message found" {
-        return Err(format!(
-            "No assistant message found on {} page",
-            provider.display_name()
-        ));
+        .ok_or("Response extractor returned invalid content")?;
+    if content.trim().is_empty() {
+        return Err("Response extraction returned empty content".into());
     }
+    Ok(content.to_string())
+}
 
-    Ok(content)
+fn save_partial_response(output: &str, content: &str) -> Result<PathBuf, String> {
+    let output = Path::new(output);
+    let name = output.file_stem().unwrap_or_default().to_string_lossy();
+    let parent = output.parent().unwrap_or_else(|| Path::new(""));
+    for index in 0..1000 {
+        let suffix = if index == 0 {
+            String::new()
+        } else {
+            format!(".{index}")
+        };
+        let path = parent.join(format!("{name}{suffix}.partial.md"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(content.as_bytes())
+                    .map_err(|error| format!("Failed to save partial response: {error}"))?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Failed to save partial response: {error}")),
+        }
+    }
+    Err("Could not create a unique partial response file".into())
+}
+
+fn print_thread_link(url: &str) {
+    if io::stdout().is_terminal() {
+        println!("\n🌐 \x1b[1mThread Link:\x1b[0m \x1b[4;36m{}\x1b[0m", url);
+    } else {
+        println!("\nThread Link: {}", url);
+    }
+}
+
+fn emit_response_result(
+    config_path: &str,
+    provider: Provider,
+    result: ResponseWaitResult,
+    fallback_url: Option<&str>,
+    cli: &Cli,
+    use_glow: bool,
+    verbose: bool,
+) -> Result<(), String> {
+    let url = result.url.as_deref().or(fallback_url);
+    let retrieval = (|| {
+        let state = result.snapshot.as_ref().ok_or_else(|| {
+            result.error.clone().unwrap_or_else(|| {
+                "No assistant response found for this request before the deadline".into()
+            })
+        })?;
+        let target = response_target(state)?;
+        if !result.completed {
+            let partial = scrape_latest_markdown_from_dom(
+                config_path,
+                provider,
+                &target,
+                true,
+                RESPONSE_RECOVERY_TIMEOUT,
+            );
+            if let Ok(content) = partial {
+                eprintln!(
+                    "Warning: Partial response; completion was not confirmed. This command failed."
+                );
+                render_markdown(&content, use_glow)?;
+                if let Some(output) = &cli.output {
+                    let path = save_partial_response(output, &content)?;
+                    eprintln!("Saved partial response to: {}", path.display());
+                }
+            } else if let Err(error) = partial {
+                eprintln!("Failed to retrieve partial response: {error}");
+            }
+            return Err(result.error.clone().unwrap_or_else(|| {
+                "Response completion was not confirmed before the deadline".into()
+            }));
+        }
+        let content = copy_latest_markdown(config_path, provider, &target)?;
+        if let Some(output) = &cli.output {
+            std::fs::write(output, &content)
+                .map_err(|error| format!("Failed to write output file: {error}"))?;
+        }
+        render_markdown(&content, use_glow)?;
+        download_images_from_latest_message(
+            config_path,
+            provider,
+            &target,
+            cli.image_output.as_deref(),
+            Duration::from_secs(cli.timeout),
+            verbose,
+        )?;
+        Ok(())
+    })();
+    if let Some(url) = url {
+        print_thread_link(url);
+    }
+    retrieval
 }
 
 #[derive(Debug, PartialEq)]
@@ -5049,43 +5343,35 @@ where
     }
 }
 
-fn build_image_scan_script(latest_selector: &str, image_wait_timeout: Duration) -> String {
+fn build_image_scan_script(
+    provider: Provider,
+    target: &response::Target,
+    image_wait_timeout: Duration,
+) -> Result<String, String> {
+    let target_json = serde_json::to_string(target).map_err(|error| error.to_string())?;
     let image_wait_timeout_ms = image_wait_timeout.as_millis().min(10_000);
-    r#"() => {
+    Ok(r#"() => {
+                __RESPONSE_HELPER__
                 const imageScanDeadline = performance.now() + __IMAGE_WAIT_TIMEOUT_MS__;
                 window.__downloaded_images_status = "pending";
                 window.__downloaded_images = null;
                 (async () => {
                     try {
-                        const messages = document.querySelectorAll(__LATEST_SELECTOR__);
-                        const latestMessage = messages[messages.length - 1];
+                        const latestMessage = globalThis.AskBridgeResponses.target(__PROVIDER__, __TARGET__);
                         if (!latestMessage) {
                             window.__downloaded_images = { images: [], shouldRetry: false };
                             window.__downloaded_images_status = "success";
                             return;
                         }
 
-                        const imgs = Array.from(latestMessage.querySelectorAll('img'));
+                        const candidateImgs = globalThis.AskBridgeResponses.responseImages(latestMessage);
                         const responseText = (latestMessage.innerText || latestMessage.textContent || '').trim();
                         const pendingImageMarker = latestMessage.querySelector(
-                            '[aria-busy="true"], [data-is-streaming="true"], [data-testid*="image"], [data-testid*="generat"], [class*="image"], [class*="generat"]'
+                            '[aria-busy="true"], [data-is-streaming="true"], [data-testid*="image-generation"]'
                         );
-                        const hasImageHint = imgs.length > 0 ||
-                            responseText.length === 0 ||
-                            Boolean(pendingImageMarker);
-                        const seenSrcs = new Set();
-                        const candidateImgs = imgs.filter(img => {
-                            const src = img.src || '';
-                            if (src.includes('avatar') || src.includes('profile')) return false;
-                            const width = img.naturalWidth || img.width || 0;
-                            const height = img.naturalHeight || img.height || 0;
-                            if (width > 0 && width < 100) return false;
-                            if (height > 0 && height < 100) return false;
-                            if (!src.startsWith('http') && !src.startsWith('blob:') && !src.startsWith('data:image/')) return false;
-                            if (seenSrcs.has(src)) return false;
-                            seenSrcs.add(src);
-                            return true;
-                        });
+                        // 引用來源的 favicon 與小圖示不是待下載的生成圖片。
+                        const hasImageHint = candidateImgs.length > 0 ||
+                            (responseText.length === 0 && Boolean(pendingImageMarker));
 
                         const imagesData = [];
                         const waitForImage = (img) => new Promise((resolve) => {
@@ -5162,12 +5448,15 @@ fn build_image_scan_script(latest_selector: &str, image_wait_timeout: Duration) 
                 return { ok: true };
             }"#
     .replace("__IMAGE_WAIT_TIMEOUT_MS__", &image_wait_timeout_ms.to_string())
-    .replace("__LATEST_SELECTOR__", latest_selector)
+    .replace("__RESPONSE_HELPER__", include_str!("response-dom.cjs"))
+    .replace("__PROVIDER__", &format!("{:?}", provider.response_provider_name()))
+    .replace("__TARGET__", &target_json))
 }
 
 fn download_images_from_latest_message(
     config_path: &str,
     provider: Provider,
+    target: &response::Target,
     image_output: Option<&str>,
     image_wait_timeout: Duration,
     verbose: bool,
@@ -5175,11 +5464,9 @@ fn download_images_from_latest_message(
     if verbose {
         println!("Checking for generated images in the latest assistant response...");
     }
-    let latest_selector = serde_json::to_string(provider.latest_response_selector())
-        .map_err(|e| format!("Failed to serialize response selector: {}", e))?;
     let mut scan_images_once = |scan_timeout: Duration| -> Result<ImageScanResult, String> {
         let scan_timeout = std::cmp::min(scan_timeout, IMAGE_SCAN_MAX_WAIT);
-        let image_scan_js = build_image_scan_script(&latest_selector, scan_timeout);
+        let image_scan_js = build_image_scan_script(provider, target, scan_timeout)?;
         let start_res = call_mcp_tool(
             config_path,
             "evaluate_script",
@@ -6199,7 +6486,10 @@ fn wait_for_chatgpt_agent_menu(config_path: &str) -> Result<(), String> {
                 const rect = el.getBoundingClientRect();
                 return rect.width > 0 && rect.height > 0;
             };
-            const composer = document.querySelector('#prompt-textarea');
+            const composerSelectors = __COMPOSER_SELECTORS__;
+            const composer = composerSelectors
+                .map((selector) => document.querySelector(selector))
+                .find(isVisible);
             const composerRect = composer ? composer.getBoundingClientRect() : null;
             const isNearComposer = (el) => {
                 if (!composerRect) return true;
@@ -6218,7 +6508,11 @@ fn wait_for_chatgpt_agent_menu(config_path: &str) -> Result<(), String> {
                 .filter(Boolean);
 
             return { ok: items.length > 0, items: items.slice(0, 5) };
-        }"#;
+        }"#
+    .replace(
+        "__COMPOSER_SELECTORS__",
+        Provider::ChatGpt.composer_selectors_json(),
+    );
 
     let mut last_state = String::new();
     for _ in 0..40 {
@@ -6247,7 +6541,10 @@ fn wait_for_chatgpt_agent_menu(config_path: &str) -> Result<(), String> {
 
 fn wait_for_chatgpt_agent_selection(config_path: &str) -> Result<(), String> {
     let js = r#"() => {
-            const composer = document.querySelector('#prompt-textarea');
+            const composerSelectors = __COMPOSER_SELECTORS__;
+            const composer = composerSelectors
+                .map((selector) => document.querySelector(selector))
+                .find(Boolean);
             if (!composer) {
                 return { ok: false, error: 'composer not found' };
             }
@@ -6259,7 +6556,11 @@ fn wait_for_chatgpt_agent_selection(config_path: &str) -> Result<(), String> {
                 text: (composer.innerText || composer.textContent || '').trim(),
                 keyword: agentPill ? (agentPill.getAttribute('data-keyword') || agentPill.textContent || '').trim() : ''
             };
-        }"#;
+        }"#
+    .replace(
+        "__COMPOSER_SELECTORS__",
+        Provider::ChatGpt.composer_selectors_json(),
+    );
 
     let mut last_state = String::new();
     for _ in 0..40 {
@@ -6464,7 +6765,10 @@ fn submit_chatgpt_agent_prompt(
                 try {
                     const sendSelectors = __SEND_SELECTORS__;
                     const stopSelectors = __STOP_SELECTORS__;
-                    const el = document.querySelector('#prompt-textarea');
+                    const composerSelectors = __COMPOSER_SELECTORS__;
+                    const el = composerSelectors
+                        .map((selector) => document.querySelector(selector))
+                        .find(Boolean);
                     if (!el) {
                         window.__submit_status = 'error: composer not found';
                         return;
@@ -6572,7 +6876,11 @@ fn submit_chatgpt_agent_prompt(
                 }
             })();
             return true;
-        }"#
+    }"#
+    .replace(
+        "__COMPOSER_SELECTORS__",
+        Provider::ChatGpt.composer_selectors_json(),
+    )
     .replace(
         "__SEND_SELECTORS__",
         Provider::ChatGpt.send_button_selectors_json(),
@@ -7194,7 +7502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    if let Some(command) = cli.command {
+    if let Some(command) = cli.command.clone() {
         match command {
             Commands::Open { url } => {
                 if let Some(url) = url {
@@ -7210,33 +7518,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     }
 
-                    match copy_latest_markdown(&config_path, page_provider) {
-                        Ok(markdown) => {
-                            if let Some(ref output_path) = cli.output {
-                                let _ = std::fs::write(output_path, &markdown).map_err(|e| {
-                                    eprintln!("Error writing output file: {}", e);
-                                    std::process::exit(1);
-                                });
-                            }
-                            if let Err(e) = render_markdown(&markdown, use_glow) {
-                                eprintln!("Error rendering Markdown: {}", e);
-                                std::process::exit(1);
-                            }
-                            if let Err(e) = download_images_from_latest_message(
-                                &config_path,
-                                page_provider,
-                                cli.image_output.as_deref(),
-                                Duration::from_secs(cli.timeout),
-                                command_verbose,
-                            ) {
-                                eprintln!("Error downloading images: {}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Error copying latest response Markdown: {}", e);
-                            std::process::exit(1);
-                        }
+                    let result = wait_for_response(
+                        &config_path,
+                        page_provider,
+                        None,
+                        Some(&url),
+                        Duration::from_secs(cli.timeout.min(15)),
+                        false,
+                        command_verbose,
+                    );
+                    if let Err(error) = emit_response_result(
+                        &config_path,
+                        page_provider,
+                        result,
+                        Some(&url),
+                        &cli,
+                        use_glow,
+                        command_verbose,
+                    ) {
+                        eprintln!("Error retrieving response: {error}");
+                        std::process::exit(1);
                     }
                 } else {
                     if let Err(e) = ensure_provider_tab(
@@ -7255,12 +7556,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Commands::Get { url, .. } => {
                 let mut page_provider = provider;
-                if let Some(url) = url {
-                    page_provider = Provider::from_url(&url).unwrap_or(provider);
+                if let Some(url) = &url {
+                    page_provider = Provider::from_url(url).unwrap_or(provider);
                     if let Err(e) = open_url_tab(
                         &config_path,
                         page_provider,
-                        &url,
+                        url,
                         is_headless,
                         command_verbose,
                     ) {
@@ -7280,33 +7581,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                match copy_latest_markdown(&config_path, page_provider) {
-                    Ok(markdown) => {
-                        if let Some(ref output_path) = cli.output {
-                            let _ = std::fs::write(output_path, &markdown).map_err(|e| {
-                                eprintln!("Error writing output file: {}", e);
-                                std::process::exit(1);
-                            });
-                        }
-                        if let Err(e) = render_markdown(&markdown, use_glow) {
-                            eprintln!("Error rendering Markdown: {}", e);
-                            std::process::exit(1);
-                        }
-                        if let Err(e) = download_images_from_latest_message(
-                            &config_path,
-                            page_provider,
-                            cli.image_output.as_deref(),
-                            Duration::from_secs(cli.timeout),
-                            command_verbose,
-                        ) {
-                            eprintln!("Error downloading images: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error copying latest response Markdown: {}", e);
-                        std::process::exit(1);
-                    }
+                let result = wait_for_response(
+                    &config_path,
+                    page_provider,
+                    None,
+                    url.as_deref(),
+                    Duration::from_secs(cli.timeout.min(15)),
+                    false,
+                    command_verbose,
+                );
+                if let Err(error) = emit_response_result(
+                    &config_path,
+                    page_provider,
+                    result,
+                    url.as_deref(),
+                    &cli,
+                    use_glow,
+                    command_verbose,
+                ) {
+                    eprintln!("Error retrieving response: {error}");
+                    std::process::exit(1);
                 }
                 return Ok(());
             }
@@ -7440,7 +7734,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             recv_piped_stdin(&probe_rx, &data_rx, STDIN_PIPE_GRACE, cli.prompt.is_some())?;
     }
 
-    let prompt = match cli.prompt {
+    let prompt = match cli.prompt.clone() {
         Some(mut p) => {
             if !stdin_prompt.is_empty() {
                 p.push_str("\n\n");
@@ -7555,213 +7849,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Get initial number of assistant messages before submitting the prompt
-    let assistant_selector = serde_json::to_string(provider.assistant_selector())
-        .map_err(|e| format!("Failed to serialize assistant selector: {}", e))?;
-    let count_res = call_mcp_tool(
-        &config_path,
-        "evaluate_script",
-        serde_json::json!({
-            "function": format!("() => document.querySelectorAll({}).length", assistant_selector)
-        }),
-    )?;
-    let initial_assistant_count = parse_script_result(&count_res)
-        .ok()
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-
+    // 先記錄回答身分與使用者訊息；讀取失敗時不送出，避免無法對應結果。
+    let baseline = read_response_snapshot(&config_path, provider, MCP_CALL_TIMEOUT)?;
+    let fallback_url = baseline.url.clone();
     if command_verbose {
         println!("Setting prompt text and submitting...");
     }
     let status = submit_prompt_to_provider(&config_path, provider, &prompt, command_verbose)
-        .map_err(|e| format!("Text entry or submission failed: {}", e))?;
-
+        .map_err(|error| format!("Text entry or submission failed: {error}"))?;
     if command_verbose {
-        println!("Prompt submitted successfully: {}", status);
-    }
-
-    if command_verbose {
+        println!("Prompt submitted successfully: {status}");
         println!("Waiting for {} response...", provider.display_name());
     }
-
-    let response_wait_started_at = Instant::now();
-    let mut last_markdown = String::new();
-    let mut finished = false;
-    let mut wait_cycles = 0;
-    let mut stable_done_checks = 0;
-    let spinner_frames = vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let mut spinner_idx = 0;
-
-    let max_wait_cycles: usize =
-        usize::try_from(cli.timeout.saturating_mul(10)).unwrap_or(usize::MAX);
-    while !finished && wait_cycles < max_wait_cycles {
-        // Max wait time: timeout seconds (timeout * 10 * 100ms)
-        if is_terminal {
-            let frame = spinner_frames[spinner_idx % spinner_frames.len()];
-            print!(
-                "\r\x1b[1;36m{}\x1b[0m 正在等待 {} 回應...",
-                frame,
-                provider.display_name()
-            );
-            io::stdout().flush()?;
-            spinner_idx += 1;
-        }
-
-        if wait_cycles % 5 == 0 {
-            let stop_selectors = provider.stop_button_selectors_json();
-            let assistant_selector = serde_json::to_string(provider.assistant_selector())
-                .map_err(|e| format!("Failed to serialize assistant selector: {}", e))?;
-            let response_check_js = r#"() => {
-                    const stopSelectors = __STOP_SELECTORS__;
-                    const isVisible = (el) => {
-                        if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
-                        const style = window.getComputedStyle(el);
-                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-                        const rect = el.getBoundingClientRect();
-                        return rect.width > 0 && rect.height > 0;
-                    };
-                    const stopButton = stopSelectors.map((selector) => document.querySelector(selector)).find(isVisible);
-                    const messages = document.querySelectorAll(__ASSISTANT_SELECTOR__);
-                    const isNew = messages.length > __INITIAL_COUNT__;
-                    
-                    if (isVisible(stopButton)) {
-                        return { status: "generating", isNew: isNew };
-                    }
-                    
-                    if (isNew) {
-                        return { status: "done", isNew: isNew };
-                    }
-                    
-                    return { status: "waiting", isNew: isNew };
-                }"#
-            .replace("__STOP_SELECTORS__", stop_selectors)
-            .replace("__ASSISTANT_SELECTOR__", &assistant_selector)
-            .replace("__INITIAL_COUNT__", &initial_assistant_count.to_string());
-            let check_res = match call_mcp_tool(
-                &config_path,
-                "evaluate_script",
-                serde_json::json!({
-                    "function": response_check_js
-                }),
-            ) {
-                Ok(res) => res,
-                Err(e) => {
-                    if command_verbose {
-                        eprintln!(
-                            "Warning: Failed to poll {} response: {}",
-                            provider.display_name(),
-                            e
-                        );
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                    wait_cycles += 1;
-                    continue;
-                }
-            };
-
-            if let Ok(parsed) = parse_script_result(&check_res) {
-                let status = parsed["status"].as_str().unwrap_or("waiting");
-                let is_new = parsed["isNew"].as_bool().unwrap_or(false);
-
-                if status == "done" && is_new {
-                    stable_done_checks += 1;
-                    if stable_done_checks >= 3 {
-                        finished = true;
-                    }
-                } else {
-                    stable_done_checks = 0;
-                }
-            }
-        }
-
-        thread::sleep(Duration::from_millis(100));
-        wait_cycles += 1;
-    }
-
-    if is_terminal {
-        print!("\r\x1b[K");
-        io::stdout().flush()?;
-    }
-
-    if !finished {
-        eprintln!(
-            "\nWarning: Output stream did not complete within the timeout period ({} seconds).",
-            cli.timeout
-        );
-    }
-
-    if finished {
-        if command_verbose {
-            println!(
-                "Copying final response from {} toolbar...",
-                provider.display_name()
-            );
-        }
-        match copy_latest_markdown(&config_path, provider) {
-            Ok(content) => {
-                last_markdown = content;
-            }
-            Err(e) => {
-                eprintln!(
-                    "Error copying response from {} toolbar: {}",
-                    provider.display_name(),
-                    e
-                );
-            }
-        }
-    }
-
-    if let Err(e) = render_markdown(&last_markdown, use_glow) {
-        eprintln!("Error rendering Markdown: {}", e);
-    }
-
-    let mut image_download_error = None;
-    if finished {
-        let image_wait_timeout =
-            Duration::from_secs(cli.timeout).saturating_sub(response_wait_started_at.elapsed());
-        if let Err(e) = download_images_from_latest_message(
-            &config_path,
-            provider,
-            cli.image_output.as_deref(),
-            image_wait_timeout,
-            command_verbose,
-        ) {
-            image_download_error = Some(e);
-        }
-    }
-
-    // Print the URL link of the current conversation thread
-    let url_opt = call_mcp_tool(
+    let result = wait_for_response(
         &config_path,
-        "evaluate_script",
-        serde_json::json!({
-            "function": "() => window.location.href"
-        }),
-    )
-    .ok()
-    .and_then(|url_val| parse_script_result(&url_val).ok())
-    .and_then(|u| u.as_str().map(|s| s.to_string()));
-
-    if let Some(url) = url_opt {
-        if is_terminal {
-            println!("\n🌐 \x1b[1mThread Link:\x1b[0m \x1b[4;36m{}\x1b[0m", url);
-        } else {
-            println!("\nThread Link: {}", url);
-        }
-    }
-
-    if let Some(error) = image_download_error {
-        eprintln!("Error downloading images: {}", error);
+        provider,
+        Some(baseline),
+        None,
+        Duration::from_secs(cli.timeout),
+        true,
+        command_verbose,
+    );
+    if let Err(error) = emit_response_result(
+        &config_path,
+        provider,
+        result,
+        Some(&fallback_url),
+        &cli,
+        use_glow,
+        command_verbose,
+    ) {
+        eprintln!("Error retrieving response: {error}");
         std::process::exit(1);
     }
-
-    if let Some(ref output_path) = cli.output {
-        if let Err(e) = std::fs::write(output_path, &last_markdown) {
-            eprintln!("Error writing output file: {}", e);
-        } else if command_verbose {
-            println!("Successfully wrote Markdown response to {}", output_path);
-        }
-    }
-
     Ok(())
 }
