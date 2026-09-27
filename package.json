@@ -31,5 +31,8 @@
     "cli"
   ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "chrome-devtools-mcp": "^1.10.1"
+  }
 }
