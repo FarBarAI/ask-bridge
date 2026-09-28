@@ -18,10 +18,14 @@
     claude: 'button[aria-label="Stop response"], button[aria-label*="Stop"], button[aria-label*="停止"]',
   };
   const contentSelectors = {
-    chatgpt: '[data-markdown-text-style="assistant-message"], .markdown',
     gemini: 'message-content, .markdown, structured-content-container.model-response-text',
     claude: '.standard-markdown, .font-claude-response-body',
   };
+  const chatGptReasoningSelector = '[data-testid*="thinking"], [data-testid*="reasoning"], [data-testid*="thought"], [class*="thinking"], [class*="reasoning"]';
+
+  function inChatGptReasoning(element) {
+    return Boolean(element.closest(chatGptReasoningSelector));
+  }
 
   function visible(element) {
     if (!element || element.disabled || element.getAttribute('aria-disabled') === 'true') return false;
@@ -79,17 +83,26 @@
   }
 
   function content(element, provider) {
+    if (provider === 'chatgpt') {
+      // 思考摘要可能排在最終回答前；只接受回答本體，找不到時停止擷取。
+      const finalAnswer = Array.from(element.querySelectorAll('[data-markdown-text-style="assistant-message"]'))
+        .find((node) => !inChatGptReasoning(node));
+      if (finalAnswer) return finalAnswer;
+      return Array.from(element.querySelectorAll('.markdown'))
+        .find((node) => !inChatGptReasoning(node)) || null;
+    }
     return element.querySelector(contentSelectors[provider]) || element;
   }
 
-  function responseButton(button) {
+  function responseButton(button, provider) {
     return !button.disabled && button.getAttribute('aria-disabled') !== 'true'
       && !button.closest('pre, code, [data-code-block], [data-testid*="code"], [class*="code-block"], [data-markdown-copy="exclude"], [data-user-message-bubble], [class*="user-message"]')
+      && (provider !== 'chatgpt' || !inChatGptReasoning(button))
       && !/prompt|提示詞|提示词|table|表格|copy code|複製程式碼|复制代码|copy link|copy image|copy citation|複製連結|複製圖片|複製引文/i.test(label(button));
   }
 
-  function copyButton(button) {
-    return responseButton(button) && /copy|複製|复制|コピー|복사/i.test(label(button));
+  function copyButton(button, provider) {
+    return responseButton(button, provider) && /copy|複製|复制|コピー|복사/i.test(label(button));
   }
 
   function scope(element, provider) {
@@ -98,7 +111,7 @@
     for (let level = 0; parent && level < 7; level += 1, parent = parent.parentElement) {
       const responses = findWithin(parent, provider);
       if (responses.some((other) => other !== element && !element.contains(other) && key(other) !== key(element))) break;
-      if (Array.from(parent.querySelectorAll('button')).some(copyButton)) return parent;
+      if (Array.from(parent.querySelectorAll('button')).some((button) => copyButton(button, provider))) return parent;
       if (parent.matches('article, [data-testid^="conversation-turn"]')) return parent;
     }
     return element;
@@ -133,9 +146,9 @@
       .some((button) => visible(button) && !/^(submit|send|傳送|提交)$/i.test(label(button)));
     const messages = findResponses(provider).map((element) => {
       const body = content(element, provider);
-      const text = (body.innerText || body.textContent || '').trim();
+      const text = body ? (body.innerText || body.textContent || '').trim() : '';
       const area = scope(element, provider);
-      const buttons = Array.from(area.querySelectorAll('button')).filter(responseButton);
+      const buttons = Array.from(area.querySelectorAll('button')).filter((button) => responseButton(button, provider));
       const streamNodes = [element, area, ...Array.from(area.querySelectorAll('[data-is-streaming], [aria-busy]'))];
       const streaming = streamNodes.some((node) => node.getAttribute('data-is-streaming') === 'true'
         || node.getAttribute('aria-busy') === 'true');
@@ -144,8 +157,8 @@
         || /regenerate|retry|try again|重新產生|重新生成|再試一次|重試|重做/i.test(label(button)));
       const feedback = buttons.some((button) => button.closest('thumb-up-button, thumb-down-button, [data-test-id="thumb-up-button"], [data-test-id="thumb-down-button"]')
         || /good response|bad response|positive feedback|negative feedback|thumb|like|dislike|喜歡|不喜歡|讚|滿意|答得好|有待加強/i.test(label(button)));
-      const copying = buttons.some(copyButton);
-      const images = responseImages(body);
+      const copying = buttons.some((button) => copyButton(button, provider));
+      const images = body ? responseImages(body) : [];
       return {
         key: key(element), signature: fingerprint(`${text}\n${images.map((img) => img.src).join('\n')}`),
         has_content: text.length > 0 || images.length > 0,
@@ -176,7 +189,7 @@
       element.dispatchEvent(new MouseEvent(type, { bubbles: true, view: root }));
     }
     const button = Array.from(scope(element, provider).querySelectorAll('button'))
-      .find((candidate) => copyButton(candidate) && visible(candidate));
+      .find((candidate) => copyButton(candidate, provider) && visible(candidate));
     if (!button) return { ok: false, reason: 'Copy response button not found' };
     button.click();
     return { ok: true };
@@ -184,10 +197,12 @@
 
   function markdown(provider, expected, allowPartial = false) {
     const body = content(target(provider, expected, allowPartial), provider);
+    if (!body) throw new Error('Final assistant answer content not found');
     function walk(node) {
       if (node.nodeType === 3) return node.textContent || '';
       if (node.nodeType !== 1) return '';
       const tag = node.tagName.toLowerCase();
+      if (provider === 'chatgpt' && inChatGptReasoning(node)) return '';
       if (['button', 'style', 'script'].includes(tag) || node.matches('[data-markdown-copy="exclude"], .sr-only, [aria-hidden="true"]')) return '';
       const children = () => Array.from(node.childNodes).map(walk).join('');
       if (tag === 'pre') {

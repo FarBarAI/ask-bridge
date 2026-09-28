@@ -132,6 +132,46 @@ test('沒有完成操作列的搜尋停頓不視為完成', () => {
   assert.equal(responses.snapshot('chatgpt').messages[0].complete_signal, false);
 });
 
+test('ChatGPT 僅擷取最終回答，不將前置思考摘要或其複製按鈕當成結果', () => {
+  const thoughtCopy = e('button', { 'aria-label': '複製' });
+  const thinking = e('div', { 'data-testid': 'thinking-panel' }, [
+    e('div', { class: 'markdown' }, ['內部思考摘要']), thoughtCopy,
+  ]);
+  const answer = modern('answer-id', '最終回答');
+  answer.childNodes.unshift(thinking);
+  thinking.parentElement = answer;
+  const finalCopy = e('button', { 'aria-label': '複製' });
+  fixture([e('article', {}, [answer, finalCopy, e('button', { 'aria-label': '重新產生回覆' })])]);
+  const before = responses.snapshot('chatgpt').messages[0];
+  assert.equal(responses.markdown('chatgpt', target()).content, '最終回答');
+  thinking.children[0].append('新增思考');
+  const after = responses.snapshot('chatgpt').messages[0];
+  assert.equal(after.signature, before.signature);
+  assert.equal(responses.clickCopy('chatgpt', target()).ok, true);
+  assert.equal(finalCopy.clicked, 1);
+  assert.equal(thoughtCopy.clicked, 0);
+});
+
+test('只有思考摘要時不能當成完成回答輸出', () => {
+  const thinking = e('div', { 'data-testid': 'reasoning-panel' }, [
+    e('div', { class: 'markdown' }, ['思考摘要']),
+  ]);
+  const answer = e('div', { 'data-content-search-unit-key': 'turn:3:assistant' }, [thinking]);
+  fixture([answer, e('button', { 'aria-label': '重新產生回覆' })]);
+  const snapshot = responses.snapshot('chatgpt').messages[0];
+  assert.equal(snapshot.has_content, false);
+  assert.throws(() => responses.markdown('chatgpt', target(), true), /Final assistant answer content not found/);
+});
+
+test('舊版 ChatGPT Markdown 也略過思考區塊，只保留最終回答', () => {
+  const answer = e('div', { 'data-message-author-role': 'assistant' }, [
+    e('div', { class: 'reasoning-panel' }, [e('div', { class: 'markdown' }, ['摘要過程'])]),
+    e('div', { class: 'markdown' }, ['舊介面最終回答']),
+  ]);
+  fixture([e('article', {}, [answer, e('button', { 'aria-label': '複製' }), e('button', { 'aria-label': '重新產生回覆' })])]);
+  assert.equal(responses.markdown('chatgpt', target()).content, '舊介面最終回答');
+});
+
 test('回答與操作列為兄弟元素時能找到完成訊號，排除使用者與表格複製按鈕', () => {
   const userCopy = e('button', { 'aria-label': '複製訊息' });
   const tableCopy = e('button', { 'aria-label': '複製表格' });
