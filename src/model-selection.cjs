@@ -138,7 +138,11 @@
 
   function findPicker(provider) {
     if (provider === 'chatgpt') {
-      return document.querySelector('button.__composer-pill');
+      return document.querySelector('button.__composer-pill')
+        || visibleElements('button').find((button) => (
+          /(?:select|choose|選取|選擇|选择).*chatgpt.*(?:model|模型)/i
+            .test(button.getAttribute('aria-label') || '')
+        ));
     }
     if (provider === 'gemini') {
       return visibleElements('button').find((button) => (
@@ -149,6 +153,67 @@
       ));
     }
     return undefined;
+  }
+
+  function reasoningSliderLevel(aliases) {
+    const levels = {
+      instant: 0, 即時: 0,
+      medium: 1, 中: 1, 中等: 1,
+      high: 2, 高: 2,
+      pro: 4,
+    };
+    for (const alias of aliases) {
+      const level = levels[normalizeLabel(alias)];
+      if (level !== undefined) return level;
+    }
+    return null;
+  }
+
+  async function selectReasoningSlider(config, picker, sleep) {
+    if (config.provider !== 'chatgpt' || config.kind !== 'reasoning') return undefined;
+    const level = reasoningSliderLevel(config.targetAliases);
+    if (level === null) return undefined;
+    const menu = visibleElements('[role="menu"]').at(-1);
+    const control = menu?.querySelector('[data-reasoning-slider]');
+    const thumb = control?.querySelector('[role="slider"]');
+    if (!thumb) return undefined; // 舊版介面維持原有選單選取流程。
+
+    const max = Number(thumb.getAttribute('aria-valuemax'));
+    if (!Number.isInteger(max) || level > max) {
+      return { ok: false, error: 'requested reasoning level is unavailable', available: [] };
+    }
+
+    control.focus();
+    for (let step = 0; step <= max; step += 1) {
+      const current = Number(thumb.getAttribute('aria-valuenow'));
+      if (current === level) break;
+      if (!Number.isInteger(current)) return { ok: false, error: 'reasoning slider has no current value', available: [] };
+      const right = current < level;
+      control.dispatchEvent(new KeyboardEvent('keydown', {
+        key: right ? 'ArrowRight' : 'ArrowLeft',
+        code: right ? 'ArrowRight' : 'ArrowLeft',
+        keyCode: right ? 39 : 37,
+        bubbles: true,
+      }));
+      await sleep(150);
+      if (Number(thumb.getAttribute('aria-valuenow')) === current) {
+        return { ok: false, error: 'reasoning slider did not move', available: [] };
+      }
+    }
+
+    // 關閉後再開啟確認選擇已保留，避免把暫時停在 Pro 當成成功。
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+    await sleep(200);
+    dispatchClick(findPicker(config.provider) || picker);
+    await sleep(500);
+    const verifiedMenu = visibleElements('[role="menu"]').at(-1);
+    const verifiedValue = verifiedMenu?.querySelector('[data-reasoning-slider] [role="slider"]')?.getAttribute('aria-valuenow');
+    const selected = verifiedMenu?.querySelector('[role="status"]')?.textContent?.trim().split(/[，,]/)[0];
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+    if (Number(verifiedValue) !== level || !labelsMatch(selected, config.verificationAliases)) {
+      return { ok: false, error: 'reasoning slider selection could not be verified', available: [] };
+    }
+    return { ok: true, selected, available: [] };
   }
 
   async function findProviderOption(config, menuSelector, available, sleep) {
@@ -215,6 +280,9 @@
     dispatchClick(picker);
     await sleep(800);
 
+    const sliderResult = await selectReasoningSlider(config, picker, sleep);
+    if (sliderResult) return sliderResult;
+
     const chosen = await findProviderOption(config, menuSelector, available, sleep);
 
     if (!chosen) {
@@ -277,8 +345,10 @@
   return {
     availablePrimaryLabels,
     findMatchingEntry,
+    findPicker,
     normalizeLabel,
     parseMenuEntry,
+    reasoningSliderLevel,
     selectProviderOption,
     selectionVerified,
   };

@@ -453,6 +453,7 @@ enum ReasoningRequest {
     ChatGptInstant,
     ChatGptMedium,
     ChatGptHigh,
+    ChatGptPro,
     GeminiExtended,
 }
 
@@ -463,6 +464,7 @@ impl ReasoningRequest {
             ReasoningRequest::ChatGptInstant => &["instant", "即時"],
             ReasoningRequest::ChatGptMedium => &["medium", "中", "中等"],
             ReasoningRequest::ChatGptHigh => &["high", "高"],
+            ReasoningRequest::ChatGptPro => &["pro"],
             ReasoningRequest::GeminiExtended => &["extended thinking", "延伸思考"],
         }
     }
@@ -498,6 +500,7 @@ fn parse_chatgpt_reasoning(value: &str) -> Option<ReasoningRequest> {
         "instant" | "即時" => Some(ReasoningRequest::ChatGptInstant),
         "medium" | "中" | "中等" => Some(ReasoningRequest::ChatGptMedium),
         "high" | "高" => Some(ReasoningRequest::ChatGptHigh),
+        "pro" => Some(ReasoningRequest::ChatGptPro),
         _ => None,
     }
 }
@@ -542,7 +545,7 @@ fn resolve_selection_plan(
         (_, None) => None,
         (Provider::ChatGpt, Some(value)) => Some(parse_chatgpt_reasoning(value).ok_or_else(|| {
             format!(
-                "Unsupported ChatGPT reasoning '{value}'. Supported values: auto, instant, medium, high"
+                "Unsupported ChatGPT reasoning '{value}'. Supported values: auto, instant, medium, high, pro"
             )
         })?),
         (Provider::Gemini, Some(value)) => Some(parse_gemini_reasoning(value).ok_or_else(|| {
@@ -569,11 +572,15 @@ fn resolve_selection_plan(
         );
     }
 
-    let (model, reasoning, used_legacy_model) = if let Some(legacy) = legacy_reasoning {
+    let (model, mut reasoning, used_legacy_model) = if let Some(legacy) = legacy_reasoning {
         (None, Some(legacy), true)
     } else {
         (model, explicit_reasoning, false)
     };
+
+    if provider == Provider::ChatGpt && reasoning.is_none() {
+        reasoning = Some(ReasoningRequest::ChatGptPro);
+    }
 
     if provider == Provider::Gemini
         && reasoning == Some(ReasoningRequest::GeminiExtended)
@@ -706,7 +713,7 @@ struct Cli {
     model: Option<String>,
 
     /// Select provider-specific reasoning separately from the model.
-    /// ChatGPT: auto, instant, medium, high. Gemini: extended. Claude: unsupported.
+    /// ChatGPT: auto, instant, medium, high, pro (default). Gemini: extended. Claude: unsupported.
     #[arg(long = "reasoning", value_name = "REASONING")]
     reasoning: Option<String>,
 }
@@ -3941,6 +3948,8 @@ mod tests {
             ("中等", ReasoningRequest::ChatGptMedium),
             ("high", ReasoningRequest::ChatGptHigh),
             ("高", ReasoningRequest::ChatGptHigh),
+            ("pro", ReasoningRequest::ChatGptPro),
+            ("PRO", ReasoningRequest::ChatGptPro),
         ] {
             let plan = resolve_selection_plan(Provider::ChatGpt, None, Some(value)).unwrap();
             assert_eq!(plan.reasoning, Some(expected), "unexpected alias {value}");
@@ -3976,7 +3985,7 @@ mod tests {
     fn rejects_unsupported_or_ambiguous_reasoning_values() {
         let unsupported =
             resolve_selection_plan(Provider::ChatGpt, None, Some("ultra")).unwrap_err();
-        assert!(unsupported.contains("auto, instant, medium, high"));
+        assert!(unsupported.contains("auto, instant, medium, high, pro"));
 
         let ambiguous =
             resolve_selection_plan(Provider::ChatGpt, Some("高"), Some("high")).unwrap_err();
@@ -4007,8 +4016,20 @@ mod tests {
     }
 
     #[test]
-    fn preserves_provider_baselines_without_reasoning() {
-        for provider in [Provider::ChatGpt, Provider::Gemini, Provider::Claude] {
+    fn defaults_chatgpt_to_pro_and_preserves_other_provider_baselines() {
+        let chatgpt = resolve_selection_plan(Provider::ChatGpt, None, None).unwrap();
+        assert_eq!(chatgpt.model, None);
+        assert_eq!(chatgpt.reasoning, Some(ReasoningRequest::ChatGptPro));
+
+        let explicit_model =
+            resolve_selection_plan(Provider::ChatGpt, Some("GPT-5.6 Sol"), None).unwrap();
+        assert_eq!(explicit_model.model.as_deref(), Some("GPT-5.6 Sol"));
+        assert_eq!(explicit_model.reasoning, Some(ReasoningRequest::ChatGptPro));
+
+        let instant = resolve_selection_plan(Provider::ChatGpt, None, Some("instant")).unwrap();
+        assert_eq!(instant.reasoning, Some(ReasoningRequest::ChatGptInstant));
+
+        for provider in [Provider::Gemini, Provider::Claude] {
             let plan = resolve_selection_plan(provider, None, None).unwrap();
             assert_eq!(plan, SelectionPlan::default());
         }
@@ -6131,6 +6152,7 @@ fn switch_semantic_option(
 
     let request = serde_json::json!({
         "provider": provider.to_string(),
+        "kind": kind.display_name(),
         "targetAliases": target_aliases,
         "verificationAliases": verification_aliases,
     });

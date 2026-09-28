@@ -6,7 +6,9 @@ const test = require('node:test');
 const {
   availablePrimaryLabels,
   findMatchingEntry,
+  findPicker,
   parseMenuEntry,
+  reasoningSliderLevel,
   selectProviderOption,
   selectionVerified,
 } = require('../src/model-selection.cjs');
@@ -43,6 +45,47 @@ test('matches English ChatGPT reasoning labels', () => {
   assert.equal(findMatchingEntry(entries, ['instant', '即時']).primaryLabel, 'Instant');
   assert.equal(findMatchingEntry(entries, ['medium', '中', '中等']).primaryLabel, 'Medium');
   assert.equal(findMatchingEntry(entries, ['high', '高']).primaryLabel, 'High');
+});
+
+test('matches ChatGPT Pro precisely and does not confuse it with Instant or another Pro label', () => {
+  const entries = [
+    fixture('Instant'),
+    fixture('Pro Extended'),
+    fixture('Pro\n進階推理', { ariaChecked: 'true' }),
+  ];
+
+  const selected = findMatchingEntry(entries, ['pro']);
+  assert.equal(selected.primaryLabel, 'Pro');
+  assert.equal(selectionVerified(selected, '', ['pro']), true);
+  assert.equal(findMatchingEntry([fixture('Instant')], ['pro']), undefined);
+});
+
+test('finds the current ChatGPT model button by its accessible label', () => {
+  const previousDocument = global.document;
+  const picker = {
+    getAttribute: (name) => name === 'aria-label' ? '選取 ChatGPT 模型' : null,
+    getClientRects: () => [{}],
+  };
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [
+      { getAttribute: () => '新增檔案和更多內容', getClientRects: () => [{}] },
+      picker,
+    ],
+  };
+  try {
+    assert.equal(findPicker('chatgpt'), picker);
+  } finally {
+    global.document = previousDocument;
+  }
+});
+
+test('maps the current ChatGPT reasoning slider without treating Pro as Instant', () => {
+  assert.equal(reasoningSliderLevel(['pro']), 4);
+  assert.equal(reasoningSliderLevel(['instant', '即時']), 0);
+  assert.equal(reasoningSliderLevel(['medium', '中']), 1);
+  assert.equal(reasoningSliderLevel(['high', '高']), 2);
+  assert.equal(reasoningSliderLevel(['auto']), null);
 });
 
 test('matches Gemini modes exactly without subtitles or badges', () => {
