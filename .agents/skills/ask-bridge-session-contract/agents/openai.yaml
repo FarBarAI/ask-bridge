@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ask Bridge 會話與輸出原則"
+  short_description: "維護 Chrome DevTools 控制方式、呼叫端回傳與最終回答邊界"
+  default_prompt: "請使用 $ask-bridge-session-contract 檢查這次模型、瀏覽器或回覆流程修改是否守住專案原則。"

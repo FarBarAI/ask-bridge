@@ -189,7 +189,7 @@ prompt + "\n\n" + stdin
 | `--file <FILE>` | 附加文件檔，可重複指定 | 支援 PDF、Word、Excel、PowerPoint、純文字、Markdown、CSV、JSON、程式碼等；ChatGPT、Gemini 與 Claude 都可用 |
 | `--timeout <SECONDS>` | 設定等待上限 | 必須是大於 0 的整數，預設 `300` 秒；控制一般回覆與 `login` 登入偵測；回覆輪詢會限制每次 MCP 呼叫的剩餘時間，`get` 只等待回答載入與確認，不等待生成完成 |
 | `--model <MODEL>` | 送出 prompt 前切換模型 | 比對不分大小寫與標點；模型名稱取決於 provider UI 與帳號權限 |
-| `--reasoning <REASONING>` | 切換 provider 推理模式 | ChatGPT 支援 `auto`、`instant`、`medium`、`high`；Gemini 支援 `extended`；Claude 不支援 |
+| `--reasoning <REASONING>` | 切換 provider 推理模式 | ChatGPT 支援 `auto`、`instant`、`medium`、`high`、`pro`，一般提問預設 `pro`；Gemini 支援 `extended`；Claude 不支援 |
 | `-h`, `--help` | 顯示 help | 可用 `ask-bridge --help` 或 `ask-bridge help <COMMAND>` |
 
 只有 `--provider` 是 global option，可放在子命令前後。其他頂層選項搭配子命令時必須放在子命令之前，例如 `ask-bridge --timeout 600 login`、`ask-bridge --output /tmp/reply.md get <url>`；不要寫成 `ask-bridge login --timeout 600` 或 `ask-bridge get <url> --output ...`。
@@ -217,6 +217,7 @@ ask-bridge -p claude '請摘要這份文件。' --file notes.md
 
 - 未指定 `--provider` 時，先依全域設定檔選擇 provider；設定檔不存在時使用 ChatGPT。
 - 使用 ChatGPT 作為未設定時的預設 provider。
+- 一般 ChatGPT 提問會在送出前明確選擇 Pro；若選單沒有此選項，先回報錯誤，不改用「即時」送出。`--reasoning` 可覆蓋此預設。
 - 使用 Gemini 做替代觀點、快速摘要或使用者明確要求 Gemini 時。
 - 使用 Claude 做程式碼分析、長文摘要、替代觀點或使用者明確要求 Claude 時；Claude 也支援 `--image` 圖片輸入。
 - 若 provider 失敗，可在不增加風險的情況下改用另一個 provider 一次。
@@ -330,13 +331,14 @@ ask-bridge --timeout 600 login
 
 ```sh
 ask-bridge '證明這個數學問題。' --model 'GPT-5.6 Sol' --reasoning high
+ask-bridge '請仔細分析這個問題。' --reasoning pro
 ask-bridge '快速翻譯這段話。' --reasoning instant
 ask-bridge --provider gemini '用幾句話介紹 Rust。' --model '3.6 Flash'
 ask-bridge --provider gemini '證明這個數學問題。' --model '3.1 Pro' --reasoning extended
 ask-bridge --provider claude '用幾句話介紹 Rust。' --model Sonnet
 ```
 
-ChatGPT 的 `--reasoning` 支援 `auto`、`instant`、`medium`、`high` 與對應中文別名；Gemini 只支援 `extended`，且不能搭配非 Pro 模型；Claude 不支援 `--reasoning`。
+ChatGPT 的 `--reasoning` 支援 `auto`、`instant`、`medium`、`high`、`pro` 與既有中文別名；一般提問預設 Pro。這是網頁選單選項，實際模型與額度取決於帳號；Gemini 只支援 `extended`，且不能搭配非 Pro 模型；Claude 不支援 `--reasoning`。
 
 模型只比對 provider 選單的主標籤，忽略副標題與 badge，且不會把不存在的舊版本自動對應到其他版本。若切換失敗，應依錯誤列出的目前選項修正參數，不要猜測替代模型名稱。舊用法 `--model 高` 與 `--model 延伸思考` 暫時可用，但應改成 `--reasoning`。
 
@@ -436,6 +438,8 @@ ask-bridge close
 
 ## 使用回覆
 
+一般提問只把本次辨識到的最終 assistant 回答送回呼叫此命令的程序；指定 `--output` 時另寫本機檔案。不要把思考面板、過程摘要、MCP 診斷或未完成內容當成最終回答，也不要把結果主動轉送其他代理人 session。遇到答案定位或完成狀態不明時回報失敗。共用的 Chrome profile／ChatGPT 帳號仍可被有權存取的其他程序看到，這不等同於帳號隔離。此專案的詳細不變原則見 `.agents/skills/ask-bridge-session-contract/SKILL.md`。
+
 將回覆視為外部建議：
 
 - 先閱讀並萃取可驗證的部分，再套用到本機工作。
@@ -454,6 +458,7 @@ ask-bridge close
 | `No assistant response found` 或舊版 `No assistant message found on ... page` | 目前選取的頁面沒有被程式辨識的 assistant 回覆；可能是回答尚未出現、選錯頁籤，或頁面 selector 已變。 | 檢查 URL、目前頁籤與回答是否完成；確認後才執行一次 `get`。不要把 `get` 當成等待回覆的輪詢命令，也不要連續重試。 |
 | `Could not find ... upload menu`、`Timed out waiting for ... to show attachment` | provider 附件選單或上傳後確認流程未匹配目前 UI。 | 保留 verbose 錯誤，不要反覆重傳；可改用允許的文字輸入方式，或改用另一個已登入且獲准的 provider。 |
 | `Error switching model: ... picker not found` | provider 模型選單未被辨識，通常是 UI 或模型選項變更。 | 移除 `--model`，用 provider 預設模型重試一次；不要猜測替代模型名稱。 |
+| `Error switching reasoning` 且要求 ChatGPT Pro | 目前帳號或網頁選單無法選取、確認 Pro，或效能滑桿已變。命令在送出前停止。 | 保留完整錯誤與可用選項，核對帳號和選單；不要自動改用「即時」或重送問題。只有使用者明確改選其他強度時才依新要求執行。 |
 | `MCP tool ... timed out`、`MCP session was reset` 或 transport/process error | MCP 連線或單次瀏覽器工具呼叫逾時；和 provider 回覆等待的 `--timeout` 不同。 | 保留完整錯誤並檢查 Chrome 頁面及前一個命令是否已結束。若失敗點可能已送出 prompt，不要自動重送；先確認 provider 是否收到請求，再決定下一步。 |
 
 若回報 `Conversation changed`、`Requested assistant response changed` 或 `content changed during retrieval`，代表頁籤或回答在等待／擷取間改變；先核對原對話，不要接收其他對話的內容。網站有回答但命令失敗時，明確區分網站完成與 CLI 取回失敗，不能只因逾時就宣稱網站任務失敗。

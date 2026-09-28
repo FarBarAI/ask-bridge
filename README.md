@@ -14,6 +14,12 @@ $maintain-ask-bridge-fork 請檢查官方更新，保留目前使用中的執行
 
 完整流程見[維護 skill](.agents/skills/maintain-ask-bridge-fork/SKILL.md)。`main` 保存官方來源，`codex/local-fixes` 保存組織修正；新版先準備與驗證，再依部署授權切換。官方 `ask-bridge update`、下方安裝器與 npm wrapper 仍使用原作者下載來源，不能用來保證安裝此修正版。
 
+### 瀏覽器與回覆原則
+
+一般問答仍經專用 Chrome 的遠端除錯埠 `9223`，由 Rust CLI 呼叫 `chrome-devtools-mcp` 控制網頁；本次 Pro 預設與回答本體範圍修正沒有更換此控制媒介。先前回覆修正確實調整了 MCP 呼叫的逾時與擷取流程，不能稱為「所有 DevTools 相關程式碼完全未改」。
+
+CLI 將本次對話的 assistant 最終回答作為成功結果，回傳給**呼叫該命令的程序**，並可依使用者指定另存本機檔案；對話連結是附帶資訊，`--verbose` 另有診斷訊息。思考面板與過程摘要不應當成回答；未完成內容會標示失敗與 partial。使用中的 Chrome profile 和網站帳號仍是共用資源，這項輸出規則不提供其他程序無法存取瀏覽器對話的隔離保證。維護或檢查這些原則時使用[會話與輸出 skill](.agents/skills/ask-bridge-session-contract/SKILL.md)。
+
 `ask-bridge` 是以 Rust 撰寫的輕量命令列工具，可透過真實 Chrome 瀏覽器自動操作 ChatGPT、Gemini 與 Claude。它使用 Model Context Protocol MCP 與 Chrome DevTools Protocol CDP，並透過內建的 `doggy8088/mcp-cli` Rust library dependency 搭配 `chrome-devtools-mcp` 控制 Chrome、輸入 prompt、送出訊息，並將回覆輸出到終端機。未設定全域 provider 時預設使用 ChatGPT，可用 `--provider gemini`、`--provider claude` 或全域設定檔切換 provider。
 
 ## 設計意圖
@@ -370,8 +376,11 @@ provider 回覆後，可使用 `-i` / `--image-output` 指定生成圖片的下�
 
 使用 `--model` 在送出 prompt 前切換 provider 模型；使用 `--reasoning` 分別指定 provider 支援的推理模式。兩者可在同一次 ChatGPT 呼叫中併用；Gemini 的延伸思考只相容於 Pro 模型。
 
+ChatGPT 的一般提問預設先選取介面中的 **Pro**，不再沿用上次網頁停在「即時」的狀態。`--reasoning` 可明確覆蓋此預設；`--model` 選模型系列，未指定 `--reasoning` 時仍會選 Pro。若目前帳號或介面沒有可辨識的 Pro 選項，命令會在送出 prompt 前報錯，不暗中改用即時。Gemini、Claude 預設維持原樣。Pro 的具體模型與可用額度由網頁帳號決定，請以[OpenAI 模型說明](https://help.openai.com/en/articles/20001354-gpt-56-and-gpt-6-pro-in-chatgpt)及實際選單為準。
+
 ```bash
 ask-bridge "證明這個數學問題。" --model "GPT-5.6 Sol" --reasoning high
+ask-bridge "請仔細分析這個問題。" --reasoning pro
 ask-bridge "快速翻譯這段話。" --reasoning instant
 ask-bridge --provider gemini "用幾句話介紹 Rust。" --model "3.6 Flash"
 ask-bridge --provider gemini "證明這個數學問題。" --model "3.1 Pro" --reasoning extended
@@ -380,7 +389,7 @@ ask-bridge --provider claude "用幾句話介紹 Rust。" --model Sonnet
 
 參數規則：
 
-- **ChatGPT**：`--reasoning` 支援 `auto`、`instant`、`medium`、`high`，也接受 `智慧`、`即時`、`中`、`中等`、`高` 等對應別名。
+- **ChatGPT**：`--reasoning` 支援 `auto`、`instant`、`medium`、`high`、`pro`，也接受 `智慧`、`即時`、`中`、`中等`、`高` 等對應別名；一般提問未指定時預設 `pro`。
 - **Gemini**：`--reasoning extended` 選擇 Extended Thinking；可省略 `--model`，或搭配實際存在的 Pro 模型。
 - **Claude**：不支援 `--reasoning`；`--model` 的 Sonnet、Opus、Haiku 選擇流程維持不變。
 
@@ -421,7 +430,7 @@ ask-bridge update
 ## 運作原理
 
 1. **瀏覽器初始化**：`ask-bridge` 會檢查 Chrome 是否正在監聽 debug port `9223`。若沒有，會以專屬 profile 目錄 `~/.config/ask-bridge/chrome-profile` 啟動 Google Chrome。
-2. **MCP Bridge 設定**：啟動時會自動寫入 `~/.config/ask-bridge/mcp_servers.json`，預設設定 Chrome DevTools MCP server，使用 `chrome-devtools-mcp@latest` 與 `--browser-url=http://127.0.0.1:9223`。
+2. **MCP Bridge 設定**：啟動時會自動寫入 `~/.config/ask-bridge/mcp_servers.json`，預設設定 Chrome DevTools MCP server，使用 `chrome-devtools-mcp@1.7.0` 與 `--browser-url=http://127.0.0.1:9223`。
 3. **Client 呼叫**：`ask-bridge` 透過內建的 `doggy8088/mcp-cli` Rust library dependency 呼叫 MCP tools，例如 `list_pages`、`select_page`、`type_text` 與 `evaluate_script`，不依賴系統上的外部 `mcp-cli` 命令。
 4. **狀態輪詢**：provider 產生回覆期間，工具會以 JavaScript 檢查送出與停止按鈕狀態，擷取回覆元素的文字內容，並輸出到 `stdout`。
 

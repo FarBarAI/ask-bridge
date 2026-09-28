@@ -63,6 +63,8 @@
 
 保存這份副本的個人修正、整合官方更新、管理候選版本、切換或回復執行檔與操作 skill 時，載入專案技能 `.agents/skills/maintain-ask-bridge-fork/SKILL.md`。
 
+修改或審查 ChatGPT 預設 Pro、Chrome DevTools 控制、回覆擷取或輸出路由時，同時載入 `.agents/skills/ask-bridge-session-contract/SKILL.md`，核對瀏覽器控制路徑及「只有最終回答交回呼叫端」的原則與限制。
+
 維護 skill 記錄組織／官方來源、必要修正與尚未解決的驗證限制。它不會把日常保存視為版本升級或發布。此副本仍保留原作者安裝及發布來源；正式升版發布前，必須先確認目的地與相關設定。
 
 當需要更新專案版本時，請務必載入專案內置的 AI 代理人專用技能：
