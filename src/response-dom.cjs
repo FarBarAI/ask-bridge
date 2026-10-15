@@ -3,7 +3,7 @@
   'use strict';
 
   const assistantSelectors = {
-    chatgpt: '[data-content-search-unit-key$=":assistant"], [data-chatgpt-search-unit-key$=":assistant"], [data-message-author-role="assistant"], .agent-turn, [data-markdown-text-style="assistant-message"]',
+    chatgpt: '[data-content-search-unit-key$=":assistant"], [data-chatgpt-search-unit-key$=":assistant"], [data-message-author-role="assistant"], .agent-turn, [data-markdown-text-style="assistant-message"], [data-chatgpt-search-message-ids]:has([data-testid="generated-image-gallery"])',
     gemini: 'model-response',
     claude: '.font-claude-response',
   };
@@ -64,7 +64,10 @@
 
   function canonical(element, role) {
     const unit = element.closest(`[data-content-search-unit-key$=":${role}"], [data-chatgpt-search-unit-key$=":${role}"]`);
-    return unit || element.closest(`[data-message-author-role="${role}"]`) || element;
+    const imageTurn = role === 'assistant'
+      ? element.closest('[data-chatgpt-search-message-ids]:has([data-testid="generated-image-gallery"])')
+      : null;
+    return unit || element.closest(`[data-message-author-role="${role}"]`) || imageTurn || element;
   }
 
   function findResponses(provider, role = 'assistant') {
@@ -89,16 +92,18 @@
         .find((node) => !inChatGptReasoning(node));
       if (finalAnswer) return finalAnswer;
       return Array.from(element.querySelectorAll('.markdown'))
-        .find((node) => !inChatGptReasoning(node)) || null;
+        .find((node) => !inChatGptReasoning(node))
+        || Array.from(element.querySelectorAll('[data-testid="generated-image-gallery"]'))
+          .find((node) => !inChatGptReasoning(node)) || null;
     }
     return element.querySelector(contentSelectors[provider]) || element;
   }
 
   function responseButton(button, provider) {
     return !button.disabled && button.getAttribute('aria-disabled') !== 'true'
-      && !button.closest('pre, code, [data-code-block], [data-testid*="code"], [class*="code-block"], [data-markdown-copy="exclude"], [data-user-message-bubble], [class*="user-message"]')
+      && !button.closest('pre, code, [data-code-block], [data-testid*="code"], [class*="code-block"], [data-markdown-copy="exclude"], [data-user-message-bubble], [class*="user-message"], [data-message-author-role="user"], [data-content-search-unit-key$=":user"]')
       && (provider !== 'chatgpt' || !inChatGptReasoning(button))
-      && !/prompt|提示詞|提示词|table|表格|copy code|複製程式碼|复制代码|copy link|copy image|copy citation|複製連結|複製圖片|複製引文/i.test(label(button));
+      && !/prompt|提示詞|提示词|table|表格|copy code|複製程式碼|复制代码|copy link|copy image|copy citation|複製連結|複製圖片|複製圖像|复制图像|复制图片|複製引文/i.test(label(button));
   }
 
   function copyButton(button, provider) {
@@ -149,16 +154,19 @@
       const text = body ? (body.innerText || body.textContent || '').trim() : '';
       const area = scope(element, provider);
       const buttons = Array.from(area.querySelectorAll('button')).filter((button) => responseButton(button, provider));
-      const streamNodes = [element, area, ...Array.from(area.querySelectorAll('[data-is-streaming], [aria-busy]'))];
+      const turn = element.closest('[data-talvt-turn-state]');
+      const streamNodes = [element, area, ...(turn ? [turn] : []), ...Array.from(area.querySelectorAll('[data-is-streaming], [aria-busy], [data-talvt-turn-state]'))];
       const streaming = streamNodes.some((node) => node.getAttribute('data-is-streaming') === 'true'
-        || node.getAttribute('aria-busy') === 'true');
+        || node.getAttribute('aria-busy') === 'true'
+        || node.getAttribute('data-talvt-turn-state') === 'in_progress');
       const ended = streamNodes.some((node) => node.getAttribute('data-is-streaming') === 'false');
       const regenerate = buttons.some((button) => button.closest('regenerate-button, [data-test-id="regenerate-button"], [data-testid="regenerate-button"]')
         || /regenerate|retry|try again|重新產生|重新生成|再試一次|重試|重做/i.test(label(button)));
       const feedback = buttons.some((button) => button.closest('thumb-up-button, thumb-down-button, [data-test-id="thumb-up-button"], [data-test-id="thumb-down-button"]')
         || /good response|bad response|positive feedback|negative feedback|thumb|like|dislike|喜歡|不喜歡|讚|滿意|答得好|有待加強/i.test(label(button)));
       const copying = buttons.some((button) => copyButton(button, provider));
-      const images = body ? responseImages(body) : [];
+      const images = body ? responseImages(element)
+        .filter((img) => provider !== 'chatgpt' || !inChatGptReasoning(img)) : [];
       return {
         key: key(element), signature: fingerprint(`${text}\n${images.map((img) => img.src).join('\n')}`),
         has_content: text.length > 0 || images.length > 0,
@@ -195,6 +203,38 @@
     return { ok: true };
   }
 
+  // 使用 CodeMirror 的完整文件，避免虛擬化畫面只包含部分程式碼行。
+  function readCodeBlock(node) {
+    const editor = node.querySelector('.cm-content, [data-language]');
+    const header = node.querySelector('[data-markdown-copy="exclude"]');
+    const headerLang = header
+      ? ((header.innerText || header.textContent || '').split('\n').map((line) => line.trim()).find(Boolean) || '')
+      : '';
+    const lang = ((editor && editor.getAttribute('data-language')) || headerLang).toLowerCase();
+    const view = editor ? ((editor.cmTile && editor.cmTile.view) || (editor.cmView && editor.cmView.view)) : null;
+    let code = '';
+    try { code = view ? view.state.doc.toString() : ''; } catch (error) {}
+    if (!code && editor) {
+      const lines = Array.from(editor.querySelectorAll('.cm-line'));
+      code = lines.length > 0
+        ? lines.map((line) => line.textContent).join('\n')
+        : (editor.innerText || editor.textContent || '');
+    }
+    if (!code) {
+      const codeElement = node.querySelector('pre, code');
+      code = codeElement ? codeElement.textContent : (node.innerText || node.textContent || '');
+    }
+    return { lang, code: code.replace(/\n+$/, '') };
+  }
+
+  function codeBlocks(provider, expected) {
+    const body = content(target(provider, expected), provider);
+    if (!body) throw new Error('Final assistant answer content not found');
+    return Array.from(body.querySelectorAll('[data-code-block]'))
+      .filter((node) => provider !== 'chatgpt' || !inChatGptReasoning(node))
+      .map(readCodeBlock);
+  }
+
   function markdown(provider, expected, allowPartial = false) {
     const body = content(target(provider, expected, allowPartial), provider);
     if (!body) throw new Error('Final assistant answer content not found');
@@ -205,6 +245,11 @@
       if (provider === 'chatgpt' && inChatGptReasoning(node)) return '';
       if (['button', 'style', 'script'].includes(tag) || node.matches('[data-markdown-copy="exclude"], .sr-only, [aria-hidden="true"]')) return '';
       const children = () => Array.from(node.childNodes).map(walk).join('');
+      if (node.matches('[data-code-block]')) {
+        const block = readCodeBlock(node);
+        const fence = '`'.repeat(Math.max(3, ...Array.from(block.code.matchAll(/`+/g), (match) => match[0].length + 1)));
+        return `\n${fence}${block.lang}\n${block.code}\n${fence}\n`;
+      }
       if (tag === 'pre') {
         const code = node.querySelector('code') || node;
         const lang = Array.from(code.classList || []).find((value) => value.startsWith('language-')) || '';
@@ -237,7 +282,7 @@
     return { content: walk(body).trim().replace(/\n{3,}/g, '\n\n') };
   }
 
-  const api = { findResponses, latest, snapshot, target, clickCopy, markdown, fingerprint, responseImages };
+  const api = { findResponses, latest, snapshot, target, clickCopy, markdown, codeBlocks, fingerprint, responseImages };
   root.AskBridgeResponses = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

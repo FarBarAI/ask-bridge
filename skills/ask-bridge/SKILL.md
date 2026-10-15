@@ -189,7 +189,7 @@ prompt + "\n\n" + stdin
 | `--file <FILE>` | 附加文件檔，可重複指定 | 支援 PDF、Word、Excel、PowerPoint、純文字、Markdown、CSV、JSON、程式碼等；ChatGPT、Gemini 與 Claude 都可用 |
 | `--timeout <SECONDS>` | 設定等待上限 | 必須是大於 0 的整數，預設 `300` 秒；控制一般回覆與 `login` 登入偵測；回覆輪詢會限制每次 MCP 呼叫的剩餘時間，`get` 只等待回答載入與確認，不等待生成完成 |
 | `--model <MODEL>` | 送出 prompt 前切換模型 | 比對不分大小寫與標點；模型名稱取決於 provider UI 與帳號權限 |
-| `--reasoning <REASONING>` | 切換 provider 推理模式 | ChatGPT 支援 `auto`、`instant`、`medium`、`high`、`pro`，一般提問預設 `pro`；Gemini 支援 `extended`；Claude 不支援 |
+| `--reasoning <REASONING>` | 切換 provider 推理模式 | ChatGPT 支援 `auto`、`instant`、`medium`、`high`、`xhigh`、`pro`，一般提問預設 `pro`；Gemini 支援 `extended`；Claude 不支援 |
 | `-h`, `--help` | 顯示 help | 可用 `ask-bridge --help` 或 `ask-bridge help <COMMAND>` |
 
 只有 `--provider` 是 global option，可放在子命令前後。其他頂層選項搭配子命令時必須放在子命令之前，例如 `ask-bridge --timeout 600 login`、`ask-bridge --output /tmp/reply.md get <url>`；不要寫成 `ask-bridge login --timeout 600` 或 `ask-bridge get <url> --output ...`。
@@ -338,7 +338,7 @@ ask-bridge --provider gemini '證明這個數學問題。' --model '3.1 Pro' --r
 ask-bridge --provider claude '用幾句話介紹 Rust。' --model Sonnet
 ```
 
-ChatGPT 的 `--reasoning` 支援 `auto`、`instant`、`medium`、`high`、`pro` 與既有中文別名；一般提問預設 Pro。這是網頁選單選項，實際模型與額度取決於帳號；Gemini 只支援 `extended`，且不能搭配非 Pro 模型；Claude 不支援 `--reasoning`。
+ChatGPT 的 `--reasoning` 支援 `auto`、`instant`、`medium`、`high`、`xhigh`、`pro` 與既有中文別名；一般提問預設 Pro。這是網頁選單選項，實際模型與額度取決於帳號；Gemini 只支援 `extended`，且不能搭配非 Pro 模型；Claude 不支援 `--reasoning`。新版滑桿已移除「自動」，`auto` 僅適用於仍提供該選項的介面；送出前會自動切回「對話（Chat）」模式。
 
 模型只比對 provider 選單的主標籤，忽略副標題與 badge，且不會把不存在的舊版本自動對應到其他版本。若切換失敗，應依錯誤列出的目前選項修正參數，不要猜測替代模型名稱。舊用法 `--model 高` 與 `--model 延伸思考` 暫時可用，但應改成 `--reasoning`。
 

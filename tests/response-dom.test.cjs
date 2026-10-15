@@ -31,6 +31,8 @@ class Element {
   matches(selector) {
     return selector.split(',').some((raw) => {
       const part = raw.trim();
+      const has = part.match(/^(.*):has\((.*)\)$/);
+      if (has) return this.matches(has[1]) && Boolean(this.querySelector(has[2]));
       if (part.startsWith('.')) return this.classList.includes(part.slice(1));
       if (part.startsWith('#')) return this.id === part.slice(1);
       const attribute = part.match(/^\[([^\s\]^$*=]+)([$^*]?=)?(?:"([^"]*)")?\]$/);
@@ -285,4 +287,78 @@ test('Gemini 中文操作列與自訂元件可辨識完成，不依賴英文標�
   fixture([answer]);
   assert.equal(responses.snapshot('gemini').messages[0].complete_signal, true);
   assert.equal(responses.markdown('gemini', target('gemini')).content, 'GEMINI_BRIDGE_OK');
+});
+
+test('新版純圖片回覆以訊息識別碼定位，並排除複製圖像按鈕', () => {
+  const image = e('img', { src: 'https://example.com/generated.png' });
+  image.naturalWidth = 1024;
+  image.naturalHeight = 1024;
+  const gallery = e('div', { 'data-testid': 'generated-image-gallery' }, [image]);
+  const answer = e('div', { 'data-chatgpt-search-message-ids': 'image-answer' }, [gallery]);
+  const imageCopy = e('button', { 'aria-label': '複製圖像' });
+  const finalCopy = e('button', { 'aria-label': '複製' });
+  fixture([e('article', {}, [answer, imageCopy, finalCopy, e('button', { 'aria-label': '重新產生回覆' })])]);
+  assert.deepEqual(responses.findResponses('chatgpt'), [answer]);
+  assert.equal(target().key, 'message:image-answer');
+  assert.equal(responses.snapshot('chatgpt').messages[0].has_content, true);
+  assert.equal(responses.markdown('chatgpt', target()).content, '![image](https://example.com/generated.png)');
+  assert.equal(responses.clickCopy('chatgpt', target()).ok, true);
+  assert.equal(imageCopy.clicked, 0);
+  assert.equal(finalCopy.clicked, 1);
+  assert.deepEqual(responses.responseImages(responses.target('chatgpt', target())), [image]);
+});
+
+test('新版 in_progress 串流狀態阻止提前擷取，即使完成操作列已存在', () => {
+  const turn = e('section', { 'data-talvt-turn-state': 'in_progress' }, [
+    modern('stream'), e('button', { 'aria-label': '複製' }), e('button', { 'aria-label': '重新產生回覆' }),
+  ]);
+  fixture([turn]);
+  assert.equal(responses.snapshot('chatgpt').messages[0].streaming, true);
+  assert.throws(() => responses.markdown('chatgpt', target()), /generating/);
+  turn.attributes['data-talvt-turn-state'] = 'completed';
+  assert.equal(responses.markdown('chatgpt', target()).content, '回答');
+});
+
+test('圖片回覆包含最終文字時仍綁定外層訊息，不遺失圖片或重複計數', () => {
+  const image = e('img', { src: 'https://example.com/generated.png' });
+  image.naturalWidth = 1024;
+  image.naturalHeight = 1024;
+  const answer = e('div', { 'data-chatgpt-search-message-ids': 'mixed-answer' }, [
+    e('div', { 'data-markdown-text-style': 'assistant-message' }, ['已完成圖片']),
+    e('div', { 'data-testid': 'generated-image-gallery' }, [image]),
+  ]);
+  fixture([e('article', {}, [answer, e('button', { 'aria-label': '重新產生回覆' })])]);
+  assert.deepEqual(responses.findResponses('chatgpt'), [answer]);
+  assert.equal(target().key, 'message:mixed-answer');
+  assert.deepEqual(responses.responseImages(responses.target('chatgpt', target())), [image]);
+  const expected = target();
+  image.attributes.src = 'https://example.com/replaced.png';
+  assert.throws(() => responses.markdown('chatgpt', expected), /content changed/);
+});
+
+test('CodeMirror 完整文件保留未顯示的行，並同時供剪貼簿修補及 DOM 備援使用', () => {
+  const answer = modern('code-answer', '');
+  const editor = e('div', { class: 'cm-content', 'data-language': 'Python' }, [
+    e('div', { class: 'cm-line' }, ['print(1)']),
+  ]);
+  editor.cmTile = { view: { state: { doc: { toString: () => 'print(1)\nprint(2)' } } } };
+  answer.children[0].append(e('div', { 'data-code-block': 'true' }, [editor]));
+  fixture([e('article', {}, [answer, e('button', { 'aria-label': '重新產生回覆' })])]);
+  assert.deepEqual(responses.codeBlocks('chatgpt', target()), [{ lang: 'python', code: 'print(1)\nprint(2)' }]);
+  assert.equal(responses.markdown('chatgpt', target()).content, '```python\nprint(1)\nprint(2)\n```');
+  assert.throws(() => responses.codeBlocks('chatgpt', { ...target(), key: 'another-answer' }), /not found/);
+});
+
+test('背景頁面程式碼以可見行與標頭語言還原，不納入思考面板程式碼', () => {
+  const answer = modern('code-answer', '');
+  answer.children[0].append(e('div', { 'data-testid': 'thinking-panel' }, [
+    e('div', { 'data-code-block': 'true' }, [e('code', {}, ['隱藏摘要程式碼'])]),
+  ]));
+  answer.children[0].append(e('div', { 'data-code-block': 'true' }, [
+    e('div', { 'data-markdown-copy': 'exclude' }, ['Rust']),
+    e('div', { class: 'cm-content' }, [e('div', { class: 'cm-line' }, ['fn main() {']), e('div', { class: 'cm-line' }, ['}'])]),
+  ]));
+  fixture([e('article', {}, [answer, e('button', { 'aria-label': '重新產生回覆' })])]);
+  assert.deepEqual(responses.codeBlocks('chatgpt', target()), [{ lang: 'rust', code: 'fn main() {\n}' }]);
+  assert.equal(responses.markdown('chatgpt', target()).content, '```rust\nfn main() {\n}\n```');
 });

@@ -57,7 +57,7 @@
 
 ---
 
-## 🚀 版本升級與釋出 (Bump & Release)
+## 🚀 發版 (Bump & Release)
 
 ### 組織副本的日常維護
 
@@ -67,18 +67,7 @@
 
 維護 skill 記錄組織／官方來源、必要修正與尚未解決的驗證限制。它不會把日常保存視為版本升級或發布。此副本仍保留原作者安裝及發布來源；正式升版發布前，必須先確認目的地與相關設定。
 
-當需要更新專案版本時，請務必載入專案內置的 AI 代理人專用技能：
-* **技能路徑**：`.agents/skills/bump-and-release/SKILL.md`
-
-### ⚠️ 版本更新必須同步修改的 6 個檔案：
-1. `Cargo.toml` (`version`)
-2. `package.json` (`version`)
-3. `src/main.rs` (`#[command(version)]` 巨集)
-4. `install.ps1` (`$Version` 變數)
-5. `install.sh` (`VERSION` 變數)
-6. `scripts/ask.sh` (`VERSION` 變數)
-
-*修改完後，必須執行 `cargo check` 或 `cargo build` 來自動更新 `Cargo.lock`。最後，完成 Git 提交（Commit）與推送（Push）後，必須建立帶有 `vX.Y.Z` 格式的 Git Tag 並推送到遠端倉庫。*
+使用者要求「發版」、「release」或「bump version」時，載入 `.agents/skills/bump-and-release/SKILL.md`；版本檔、CHANGELOG、CI 閘門、tag、GitHub Release 與 npm 發布依該技能處理。組織副本仍須先核對發布目的地及當次授權，不因整合官方版本而自動執行提交、推送、發布或部署。
 
 ---
 

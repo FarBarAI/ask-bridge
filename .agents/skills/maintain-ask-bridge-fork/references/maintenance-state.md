@@ -1,13 +1,28 @@
 # 維護狀態
 
-更新日期：2026-09-28。這份紀錄保存來源、必要修正及驗證限制；每次維護完成後更新。實際 Git 狀態與本機部署另行查證。
+更新日期：2026-10-15。這份紀錄保存來源、必要修正及驗證限制；每次維護完成後更新。實際 Git 狀態與本機部署另行查證。
+
+## 2026-10-15 官方更新整合（本機）
+
+- 實際官方 `main`：`5f83bf904b594050b706a6201fd0a3e8f893b7fa`，包含 6 個新提交；最新正式版本為 `0.3.1`，標籤所指提交為 `d890fe75ca0b4cc94d7d2220e07450971aff01b6`。
+- 組織修正基底：`a841ba35e58dcb52963507caa3be8a99c476a847`。整合分支：`codex/merge-upstream-20261015`；使用者已明確授權建立本機 merge commit 並將 `codex/local-fixes` 更新到相同結果，不推送遠端。
+- 本次以官方 URL fetch 至 `refs/remotes/upstream/main`；目前只有已設定的 `origin` 遠端，沒有新增或改寫 remote 設定。
+- 整合先在獨立工作目錄執行 `git merge --no-commit --no-ff upstream/main`，解決 6 個檔案的衝突並驗證，再建立本機合併提交；原分支以 `git merge --ff-only codex/merge-upstream-20261015` 採用同一結果。此整合提交的第一個 parent 是組織修正基底，第二個 parent 是官方 `main`，保留雙方歷史。
+- 採用官方新版輸入框、登入辨識、Chat 模式切換、`xhigh`、圖片回覆與 CodeMirror 程式碼換行修復，以及官方版本／發布工具更新。發布腳本仍指向原作者及原 npm 套件，本次不執行。
+- 官方依選項名稱操作推理滑桿的方式取代 fork 的固定位置表；保留 Pro 預設、舊選單入口備援、重開選單確認與不可用時停止。
+- 回覆部分保留 fork 的單一回答身分、URL、完成訊號、實際逾時預算、partial 檔與非零失敗狀態。官方圖片容器、`in_progress` 及 CodeMirror 支援移入 `response-dom.cjs`；程式碼修補同樣核對回答身分，排除思考摘要。
+- 保留 `chrome-devtools-mcp ^1.10.1` 的 npm 依賴與 fork 的完整 Node 測試入口；同步 `package-lock.json` 的專案版本為 `0.3.1`。Rust 執行時仍使用專用 Chrome `9223` 與 `chrome-devtools-mcp@1.7.0`，未更換控制媒介。
+- 本次本地驗證：116 個 Rust 測試、45 個 Node 測試、`cargo fmt --all -- --check`、全 targets Clippy（warnings 為錯誤）及兩個 CLI 的 debug 建置通過；`ask-bridge --version`／`--help` 確認 `0.3.1`、`xhigh` 及 Pro 預設。新增發布工具僅做 Node 語法檢查，安裝 shell 腳本僅做語法檢查。
+- 未做網站問答、原對話取回、搜尋、長篇完成辨識、真實圖片下載、Windows／WSL、遠端 CI 或發布驗證。前次長篇完成訊號缺失仍屬開放限制。
+- 原 checkout 的原始碼更新至整合結果；現用執行檔與外部操作 skill 未切換。本次環境的 PATH 找不到 `ask-bridge`／`ask`，也沒有下方歷史部署紀錄的位置，不能把歷史執行檔描述成目前使用版本。
+- 驗證日誌存於整合工作目錄的忽略目錄 `target/upstream-integration/`。回退基準是上述組織修正基底；需要比較舊版時另開 checkout，不直接重設共享分支。本次未推送、發版或部署。
 
 ## 來源與分支
 
 - 官方來源：<https://github.com/doggy8088/ask-bridge>。
 - 組織儲存庫：<https://github.com/FarBarAI/ask-bridge>，公開 GitHub Fork，parent 為 `doggy8088/ask-bridge`。
-- `origin` 指向 `https://github.com/FarBarAI/ask-bridge.git`，`upstream` 指向原作者；本機預設推送遠端為 origin。
-- 本次保存的官方基底：`477c15455da421fb626dc352ce9b59e32f2a839d`，版本 `0.2.13`。
+- `origin` 指向 `https://github.com/FarBarAI/ask-bridge.git`；官方來源與候選的實際取得方式見上方更新紀錄。
+- 目前本機整合的官方基底：`5f83bf904b594050b706a6201fd0a3e8f893b7fa`，版本 `0.3.1`；原官方基底 `477c15455da421fb626dc352ce9b59e32f2a839d`（`0.2.13`）保留於歷史。
 - 已保存的套件調整：`e7c195d`；已保存的程式修正：`5b6c42d`。
 - Pro 預設與現行效能滑桿：`c249810`；最終回答範圍：`1ef35ef`。
 - 官方來源分支：`main`。組織修正及組織預設分支：`codex/local-fixes`。
@@ -40,7 +55,7 @@
 
 Claude 因未登入，只完成離線結構案例；完整生成圖片下載尚未實測。此 skill 的建立與保存工作不等同於新增功能修正或重新通過上述測試。
 
-## 本機部署
+## 本機部署（2026-09-28 歷史紀錄）
 
 舊執行檔保留於 `~/.local/share/ask-bridge/releases/20260928-001647-5b6c42d-1e69c1979ddb/ask-bridge`，可用作回復點。全域 `~/.local/bin/ask-bridge` 經 `~/.local/share/ask-bridge/current/ask-bridge`，目前連到 `~/.local/share/ask-bridge/releases/20260928-160315-1ef35ef-52ac8bdd8e11/ask-bridge`；`ask` alias 經同一命令。
 

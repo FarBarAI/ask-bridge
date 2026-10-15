@@ -151,6 +151,7 @@ impl Provider {
                         return rect.width > 0 && rect.height > 0;
                     };
                     const composerSelectors = [
+                        '[data-composer-markdown][contenteditable="true"]',
                         '#prompt-textarea',
                         '[data-testid="composer-text-input"]',
                         'textarea[placeholder*="Message"]',
@@ -166,9 +167,10 @@ impl Provider {
                             if (!isVisible(el)) return false;
                             const text = [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent]
                                 .filter(Boolean).join(' ').trim();
-                            return /^(log in|login|sign in|sign up|登入|登錄|登录|註冊|注册)$/i.test(text);
+                            return /^(log in|login|sign in|sign up|登入|登錄|登录|註冊|注册|免費註冊)$/i.test(text);
                         });
-                    return Boolean(composer) || authPath || authControl;
+                    return Boolean(composer) || authPath || authControl ||
+                        document.querySelector('[data-testid="login-form"]') !== null;
                 }"#
             }
             Provider::Gemini => {
@@ -218,10 +220,11 @@ impl Provider {
                             .some((el) => {
                                 if (!isVisible(el)) return false;
                                 const text = textFor(el);
-                                return /^(log in|login|sign in|sign up|登入|登錄|登录|註冊|注册)$/i.test(text);
+                                return /^(log in|login|sign in|sign up|登入|登錄|登录|註冊|注册|免費註冊)$/i.test(text);
                             });
 
-                        const composer = document.querySelector('#prompt-textarea') ||
+                        const composer = document.querySelector('[data-composer-markdown][contenteditable="true"]') ||
+                            document.querySelector('#prompt-textarea') ||
                             document.querySelector('[data-testid="composer-text-input"]') ||
                             document.querySelector('textarea[placeholder*="Message"]') ||
                             document.querySelector('textarea[placeholder*="訊息"]') ||
@@ -237,7 +240,9 @@ impl Provider {
                             document.querySelector('button[aria-label*="User"]') ||
                             document.querySelector('button[aria-label*="user"]') ||
                             document.querySelector('button[aria-label*="帳戶"]') ||
-                            document.querySelector('button[aria-label*="使用者"]');
+                            document.querySelector('button[aria-label*="使用者"]') ||
+                            document.querySelector('button[aria-label*="個人檔案"]') ||
+                            document.querySelector('button[aria-label*="个人资料"]');
 
                         return {
                             account: isVisible(accountMenu),
@@ -354,6 +359,7 @@ impl Provider {
         match self {
             Provider::ChatGpt => {
                 r##"[
+                    "[data-composer-markdown][contenteditable=\"true\"]",
                     "#prompt-textarea",
                     "[data-testid=\"composer-text-input\"]",
                     "textarea[placeholder*=\"Message\"]",
@@ -384,6 +390,7 @@ impl Provider {
                 r##"[
                     "[data-testid=\"send-button\"]",
                     "#composer-submit-button",
+                    "form[data-chatgpt-composer] button[type=\"submit\"]",
                     "button[aria-label*=\"Send\"]",
                     "button[aria-label*=\"傳送\"]",
                     "button[aria-label*=\"发送\"]"
@@ -454,6 +461,7 @@ enum ReasoningRequest {
     ChatGptMedium,
     ChatGptHigh,
     ChatGptPro,
+    ChatGptExtraHigh,
     GeminiExtended,
 }
 
@@ -461,10 +469,13 @@ impl ReasoningRequest {
     fn target_aliases(self) -> &'static [&'static str] {
         match self {
             ReasoningRequest::ChatGptAuto => &["auto", "自動", "智慧"],
-            ReasoningRequest::ChatGptInstant => &["instant", "即時"],
+            ReasoningRequest::ChatGptInstant => &["instant", "即時", "即时"],
             ReasoningRequest::ChatGptMedium => &["medium", "中", "中等"],
             ReasoningRequest::ChatGptHigh => &["high", "高"],
             ReasoningRequest::ChatGptPro => &["pro"],
+            ReasoningRequest::ChatGptExtraHigh => {
+                &["extra high", "xhigh", "very high", "max", "極高", "极高"]
+            }
             ReasoningRequest::GeminiExtended => &["extended thinking", "延伸思考"],
         }
     }
@@ -497,10 +508,13 @@ fn normalize_option_label(value: &str) -> String {
 fn parse_chatgpt_reasoning(value: &str) -> Option<ReasoningRequest> {
     match normalize_option_label(value).as_str() {
         "auto" | "自動" | "智慧" => Some(ReasoningRequest::ChatGptAuto),
-        "instant" | "即時" => Some(ReasoningRequest::ChatGptInstant),
+        "instant" | "即時" | "即时" => Some(ReasoningRequest::ChatGptInstant),
         "medium" | "中" | "中等" => Some(ReasoningRequest::ChatGptMedium),
         "high" | "高" => Some(ReasoningRequest::ChatGptHigh),
         "pro" => Some(ReasoningRequest::ChatGptPro),
+        "xhigh" | "extrahigh" | "veryhigh" | "極高" | "极高" => {
+            Some(ReasoningRequest::ChatGptExtraHigh)
+        }
         _ => None,
     }
 }
@@ -545,7 +559,7 @@ fn resolve_selection_plan(
         (_, None) => None,
         (Provider::ChatGpt, Some(value)) => Some(parse_chatgpt_reasoning(value).ok_or_else(|| {
             format!(
-                "Unsupported ChatGPT reasoning '{value}'. Supported values: auto, instant, medium, high, pro"
+                "Unsupported ChatGPT reasoning '{value}'. Supported values: auto, instant, medium, high, xhigh, pro"
             )
         })?),
         (Provider::Gemini, Some(value)) => Some(parse_gemini_reasoning(value).ok_or_else(|| {
@@ -639,7 +653,7 @@ fn parse_chatgpt_agent_prompt(prompt: &str) -> Option<ChatGptAgentPrompt<'_>> {
 
 #[derive(Parser)]
 #[command(name = "ask-bridge")]
-#[command(version = "0.2.13")]
+#[command(version = "0.3.1")]
 #[command(disable_version_flag = true)]
 #[command(about = "AI browser CLI - Ask ChatGPT, Gemini or Claude from your Terminal with your subscription", long_about = None)]
 struct Cli {
@@ -713,7 +727,7 @@ struct Cli {
     model: Option<String>,
 
     /// Select provider-specific reasoning separately from the model.
-    /// ChatGPT: auto, instant, medium, high, pro (default). Gemini: extended. Claude: unsupported.
+    /// ChatGPT: auto, instant, medium, high, xhigh, pro (default). Gemini: extended. Claude: unsupported.
     #[arg(long = "reasoning", value_name = "REASONING")]
     reasoning: Option<String>,
 }
@@ -1728,12 +1742,30 @@ fn find_chrome_path() -> Result<String, String> {
     }
 }
 
-fn start_chrome_if_needed(headless: bool, verbose: bool) -> Result<(), String> {
+fn start_chrome_if_needed(
+    headless: bool,
+    restart_background: bool,
+    verbose: bool,
+) -> Result<(), String> {
     let profile_path = chrome_profile_path()?;
     // The Windows-host Chrome (used under WSL) consumes a UNC path, not the
     // native Linux path. Use the launch arg for `--user-data-dir` and for any
     // command-line identity matching (the recorded command line is in UNC form).
     let launch_arg = chrome_profile_launch_arg()?;
+
+    // A background instance keeps its window off-screen, so reusing it for
+    // `login` would leave the user with nothing to see. Restart it gracefully
+    // in visible mode instead.
+    if restart_background
+        && !headless
+        && debug_port_is_listening()
+        && is_debug_chrome_background(&launch_arg)
+    {
+        if verbose {
+            println!("Restarting background ask-bridge Chrome in visible mode...");
+        }
+        close_ask_chrome_on_debug_port(&launch_arg)?;
+    }
 
     if debug_port_is_listening() {
         // Under WSL, a listener visible to netstat.exe that cannot be reached
@@ -3936,6 +3968,138 @@ mod tests {
     }
 
     #[test]
+    fn chatgpt_selectors_cover_redesigned_composer_and_turns() {
+        let composers: Vec<String> =
+            serde_json::from_str(Provider::ChatGpt.composer_selectors_json()).unwrap();
+        assert_eq!(
+            composers.first().map(String::as_str),
+            Some(r#"[data-composer-markdown][contenteditable="true"]"#)
+        );
+        assert!(composers.contains(&"#prompt-textarea".to_string()));
+
+        let send: Vec<String> =
+            serde_json::from_str(Provider::ChatGpt.send_button_selectors_json()).unwrap();
+        assert!(send.contains(&r#"form[data-chatgpt-composer] button[type="submit"]"#.to_string()));
+        let stop: Vec<String> =
+            serde_json::from_str(Provider::ChatGpt.stop_button_selectors_json()).unwrap();
+        assert!(stop.contains(&r#"button[aria-label*="停止"]"#.to_string()));
+
+        let script = response_script(
+            Provider::ChatGpt,
+            "globalThis.AskBridgeResponses.snapshot(provider)",
+        );
+        assert!(script.contains(r#"[data-content-search-unit-key$=":assistant"]"#));
+        assert!(script.contains(r#"[data-testid="generated-image-gallery"]"#));
+        assert!(script.contains(r#"[data-markdown-text-style="assistant-message"]"#));
+    }
+
+    #[test]
+    fn chatgpt_ready_check_accepts_composer_or_login_page() {
+        let script = Provider::ChatGpt.ready_check_js();
+        assert!(script.contains(r#"[data-composer-markdown][contenteditable="true"]"#));
+        assert!(script.contains("prompt-textarea"));
+        assert!(script.contains(r#"[data-testid="login-form"]"#));
+        assert!(script.contains(r"/\/(auth|login|signup)(\/|$)/i"));
+        assert!(script.contains("authControl"));
+        assert!(script.contains("免費註冊"));
+    }
+
+    #[test]
+    fn chatgpt_login_signals_recognize_redesigned_composer_and_profile_menu() {
+        let script = Provider::ChatGpt.login_signals_js();
+        assert!(script.contains(r#"[data-composer-markdown][contenteditable="true"]"#));
+        assert!(script.contains(r#"button[aria-label*="個人檔案"]"#));
+    }
+
+    #[test]
+    fn chatgpt_chat_mode_script_targets_chat_composer() {
+        let script = chatgpt_chat_mode_script();
+        assert!(script.contains("form[data-chatgpt-composer]"));
+        assert!(script.contains(":scope > button[aria-pressed]"));
+        assert!(script.contains("chat|對話|对话"));
+        assert!(script.contains("buttons[0]"));
+    }
+
+    fn code_block(lang: &str, code: &str) -> CodeBlockSource {
+        CodeBlockSource {
+            lang: lang.to_string(),
+            code: code.to_string(),
+        }
+    }
+
+    #[test]
+    fn repairs_collapsed_chatgpt_code_blocks_from_editor_state() {
+        let copied =
+            "### 範例\n\n```\ncity = \"台北\"message = f\"歡迎\"print(message)\n```\n\n結尾";
+        let repaired = repair_markdown_code_blocks(
+            copied,
+            &[code_block(
+                "python",
+                "city = \"台北\"\nmessage = f\"歡迎\"\nprint(message)",
+            )],
+        );
+        assert_eq!(
+            repaired,
+            "### 範例\n\n```python\ncity = \"台北\"\nmessage = f\"歡迎\"\nprint(message)\n```\n\n結尾"
+        );
+    }
+
+    #[test]
+    fn repairs_multiple_code_blocks_in_order_and_keeps_existing_info() {
+        let copied = "a\n```\nx\n```\nb\n```js\ny\n```\nc";
+        let repaired = repair_markdown_code_blocks(
+            copied,
+            &[
+                code_block("rust", "fn main() {}"),
+                code_block("", "let y = 1;"),
+            ],
+        );
+        assert_eq!(
+            repaired,
+            "a\n```rust\nfn main() {}\n```\nb\n```js\nlet y = 1;\n```\nc"
+        );
+    }
+
+    #[test]
+    fn repairs_indented_code_blocks_inside_lists() {
+        let copied = "* step\n  ```\n  a b\n  ```";
+        let repaired = repair_markdown_code_blocks(copied, &[code_block("sh", "a\nb")]);
+        assert_eq!(repaired, "* step\n  ```sh\n  a\n  b\n  ```");
+    }
+
+    #[test]
+    fn lengthens_repaired_fence_when_code_contains_backticks() {
+        let copied = "```\nold\n```";
+        let repaired =
+            repair_markdown_code_blocks(copied, &[code_block("md", "```rust\nfn x() {}\n```")]);
+        assert_eq!(repaired, "````md\n```rust\nfn x() {}\n```\n````");
+    }
+
+    #[test]
+    fn keeps_markdown_when_code_blocks_cannot_be_paired() {
+        let copied = "```\na\n```\n\n```\nb\n```";
+        assert_eq!(
+            repair_markdown_code_blocks(copied, &[code_block("rust", "x")]),
+            copied
+        );
+        assert_eq!(repair_markdown_code_blocks("no code", &[]), "no code");
+
+        let unterminated = "```\na";
+        assert_eq!(
+            repair_markdown_code_blocks(unterminated, &[code_block("rust", "x")]),
+            unterminated
+        );
+    }
+
+    #[test]
+    fn read_code_block_helper_supports_codemirror_and_background_rendering() {
+        let script = include_str!("response-dom.cjs");
+        assert!(script.contains("editor.cmTile && editor.cmTile.view"));
+        assert!(script.contains(".cm-line"));
+        assert!(script.contains(r#"[data-markdown-copy="exclude"]"#));
+    }
+
+    #[test]
     fn resolves_chatgpt_reasoning_aliases() {
         for (value, expected) in [
             ("auto", ReasoningRequest::ChatGptAuto),
@@ -3950,6 +4114,9 @@ mod tests {
             ("高", ReasoningRequest::ChatGptHigh),
             ("pro", ReasoningRequest::ChatGptPro),
             ("PRO", ReasoningRequest::ChatGptPro),
+            ("xhigh", ReasoningRequest::ChatGptExtraHigh),
+            ("Extra High", ReasoningRequest::ChatGptExtraHigh),
+            ("極高", ReasoningRequest::ChatGptExtraHigh),
         ] {
             let plan = resolve_selection_plan(Provider::ChatGpt, None, Some(value)).unwrap();
             assert_eq!(plan.reasoning, Some(expected), "unexpected alias {value}");
@@ -3985,7 +4152,7 @@ mod tests {
     fn rejects_unsupported_or_ambiguous_reasoning_values() {
         let unsupported =
             resolve_selection_plan(Provider::ChatGpt, None, Some("ultra")).unwrap_err();
-        assert!(unsupported.contains("auto, instant, medium, high, pro"));
+        assert!(unsupported.contains("auto, instant, medium, high, xhigh, pro"));
 
         let ambiguous =
             resolve_selection_plan(Provider::ChatGpt, Some("高"), Some("high")).unwrap_err();
@@ -5140,6 +5307,11 @@ fn copy_latest_markdown(
 ) -> Result<String, String> {
     let started = Instant::now();
     match copy_latest_markdown_via_clipboard(config_path, provider, target, RESPONSE_COPY_TIMEOUT) {
+        Ok(content) if provider == Provider::ChatGpt => {
+            let remaining = RESPONSE_COPY_TIMEOUT.saturating_sub(started.elapsed());
+            let blocks = read_latest_code_blocks(config_path, provider, target, remaining)?;
+            Ok(repair_markdown_code_blocks(&content, &blocks))
+        }
         Ok(content) => Ok(content),
         Err(copy_error) => {
             let remaining = RESPONSE_COPY_TIMEOUT.saturating_sub(started.elapsed());
@@ -5155,6 +5327,115 @@ impl Drop for ClipboardRestore {
     fn drop(&mut self) {
         let _ = write_clipboard(&self.0);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct CodeBlockSource {
+    lang: String,
+    code: String,
+}
+
+fn read_latest_code_blocks(
+    config_path: &str,
+    provider: Provider,
+    target: &response::Target,
+    timeout: Duration,
+) -> Result<Vec<CodeBlockSource>, String> {
+    let target_json = serde_json::to_string(target).map_err(|error| error.to_string())?;
+    let parsed = evaluate_response_script(
+        config_path,
+        provider,
+        &format!("globalThis.AskBridgeResponses.codeBlocks(provider, {target_json})"),
+        timeout,
+    )?;
+    serde_json::from_value(parsed).map_err(|error| format!("Failed to parse code blocks: {error}"))
+}
+
+/// Returns `(fence_char, fence_len)` when `line` opens or closes a Markdown
+/// fenced code block.
+fn markdown_fence(line: &str) -> Option<(char, usize)> {
+    let fence_char = line.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let fence_len = line.chars().take_while(|c| *c == fence_char).count();
+    (fence_len >= 3).then_some((fence_char, fence_len))
+}
+
+/// Replaces the body of every fenced code block in `markdown` with the matching
+/// entry of `blocks` (in document order). The Markdown is returned unchanged
+/// when the number of fenced blocks differs, because the pairing would be
+/// ambiguous.
+fn repair_markdown_code_blocks(markdown: &str, blocks: &[CodeBlockSource]) -> String {
+    struct Fence {
+        open: usize,
+        close: usize,
+        indent: String,
+        info: String,
+    }
+
+    let lines: Vec<&str> = markdown.split('\n').collect();
+    let mut fences = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if let Some((fence_char, fence_len)) = markdown_fence(trimmed) {
+            let close = (index + 1..lines.len()).find(|&candidate| {
+                let candidate = lines[candidate].trim();
+                markdown_fence(candidate).is_some_and(|(c, len)| {
+                    c == fence_char && len >= fence_len && candidate.chars().all(|ch| ch == c)
+                })
+            });
+            let Some(close) = close else { break };
+            fences.push(Fence {
+                open: index,
+                close,
+                indent: lines[index][..lines[index].len() - trimmed.len()].to_string(),
+                info: trimmed[fence_len * fence_char.len_utf8()..]
+                    .trim()
+                    .to_string(),
+            });
+            index = close + 1;
+            continue;
+        }
+        index += 1;
+    }
+
+    if fences.is_empty() || fences.len() != blocks.len() {
+        return markdown.to_string();
+    }
+
+    let mut output: Vec<String> = Vec::with_capacity(lines.len());
+    let mut cursor = 0;
+    for (fence, block) in fences.iter().zip(blocks) {
+        output.extend(
+            lines[cursor..fence.open]
+                .iter()
+                .map(|line| line.to_string()),
+        );
+
+        let longest_backtick_run = block
+            .code
+            .split(|c| c != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        let fence_marker = "`".repeat(longest_backtick_run.max(2) + 1);
+        let info = if fence.info.is_empty() {
+            block.lang.as_str()
+        } else {
+            fence.info.as_str()
+        };
+
+        output.push(format!("{}{}{}", fence.indent, fence_marker, info));
+        output.extend(
+            block
+                .code
+                .split('\n')
+                .map(|line| format!("{}{}", fence.indent, line)),
+        );
+        output.push(format!("{}{}", fence.indent, fence_marker));
+        cursor = fence.close + 1;
+    }
+    output.extend(lines[cursor..].iter().map(|line| line.to_string()));
+    output.join("\n")
 }
 
 fn copy_latest_markdown_via_clipboard(
@@ -6406,6 +6687,64 @@ fn switch_reasoning(
     )
 }
 
+/// ChatGPT splits its composer into "Chat" and "Work" modes. ask-bridge targets
+/// Chat, so switch back when the home composer is left in Work mode.
+fn chatgpt_chat_mode_script() -> &'static str {
+    r#"async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const isChatMode = () => document.querySelector('form[data-chatgpt-composer]') !== null;
+        const findModeGroup = () => Array.from(document.querySelectorAll('[role="group"]'))
+            .find((group) => group.querySelectorAll(':scope > button[aria-pressed]').length === 2);
+
+        if (isChatMode()) return { status: 'chat' };
+
+        const group = findModeGroup();
+        if (!group) return { status: 'unavailable' };
+
+        const buttons = Array.from(group.querySelectorAll(':scope > button[aria-pressed]'));
+        const chatButton = buttons.find((button) =>
+            /^(chat|對話|对话|チャット|채팅)$/i.test((button.innerText || button.textContent || '').trim())
+        ) || buttons[0];
+        chatButton.click();
+
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+            await sleep(125);
+            if (isChatMode()) return { status: 'switched' };
+        }
+        return { status: 'failed', pressed: chatButton.getAttribute('aria-pressed') };
+    }"#
+}
+
+fn ensure_chatgpt_chat_mode(config_path: &str, verbose: bool) -> Result<(), String> {
+    let res = call_mcp_tool(
+        config_path,
+        "evaluate_script",
+        serde_json::json!({ "function": chatgpt_chat_mode_script() }),
+    )?;
+    let parsed = parse_script_result(&res)?;
+    match parsed.get("status").and_then(|status| status.as_str()) {
+        Some("chat") => Ok(()),
+        Some("switched") => {
+            if verbose {
+                println!("Switched ChatGPT composer from Work to Chat mode.");
+            }
+            Ok(())
+        }
+        Some("unavailable") => {
+            if verbose {
+                println!(
+                    "ChatGPT Chat/Work mode toggle not found; continuing with the current composer."
+                );
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "Failed to switch ChatGPT composer to Chat mode: {}",
+            parsed
+        )),
+    }
+}
+
 fn wait_for_submit_status(config_path: &str) -> Result<String, String> {
     let mut wait_cycles = 0;
     let mut status = String::from("pending");
@@ -7519,7 +7858,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    if let Err(e) = start_chrome_if_needed(is_headless, command_verbose) {
+    let restart_background = matches!(cli.command, Some(Commands::Login));
+    if let Err(e) = start_chrome_if_needed(is_headless, restart_background, command_verbose) {
         eprintln!("Error starting Chrome: {}", e);
         std::process::exit(1);
     }
@@ -7841,6 +8181,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Err(_) => {}
+    }
+
+    if provider == Provider::ChatGpt
+        && let Err(e) = ensure_chatgpt_chat_mode(&config_path, command_verbose)
+    {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
 
     // Switch model if requested (before uploading attachments / typing the prompt)
